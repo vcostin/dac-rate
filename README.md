@@ -7,7 +7,25 @@ By default PipeWire runs most outputs at 48 kHz and resamples everything to that
 - **lock** a device to one rate (for example 192 kHz), so everything is resampled to that rate once, in PipeWire, or
 - set it to **Auto**, so the device switches to each file's own rate (44.1 kHz music plays at 44.1 kHz, 96 kHz plays at 96 kHz).
 
-It runs as your user, needs no root, and only touches the device you pick.
+It runs as your user, needs no root, and only touches the device you pick. Use it from an app window, from a tray icon, or from the command line.
+
+## The app
+
+<p align="center">
+  <img src="docs/app-window.png" width="420" alt="DAC Sample Rate window: output device, live rate 192 kHz, Lock to 192 kHz, advanced options">
+  &nbsp;
+  <img src="docs/app-tray-menu.png" width="200" alt="Tray menu: Follow the content, Locked: 192 kHz, PipeWire default, Open window, Quit">
+</p>
+
+Open **DAC Sample Rate** from your app menu:
+
+- **Live rate:** the big number is the rate your DAC is running at right now, read from the hardware once a second.
+- **Choose:** *Follow the content (Auto)*, *Lock to* a rate, or *PipeWire default*, then **Apply**. Sound pauses for about a second while the audio service restarts.
+- **Advanced:** which outputs the rule covers (whole card, one USB port, or one output) and the resampler quality.
+- **Warnings:** other config files that also set rates for your DAC are listed in a yellow box, with which one wins.
+- **Tray icon:** shows the live rate as a badge. Its menu switches between Auto, a locked rate and the default without opening the window. Closing the window keeps it in the tray; **Start in the tray when I log in** makes it permanent.
+
+The app uses the `dac-rate` command for every change, so the app, the tray and the command line always agree.
 
 ## Dependencies
 
@@ -29,7 +47,8 @@ Plus the standard tools every Linux desktop has: `sed`, `awk`, `grep`, `sort`, `
 
 | What | Without it | Arch | Debian / Ubuntu | Fedora |
 |---|---|---|---|---|
-| `kdialog` or `zenity` | the picker works in the terminal only | `kdialog` / `zenity` | `kdialog` / `zenity` | `kdialog` / `zenity` |
+| Python 3 + **PySide6** | the app window and tray icon; without it the launcher opens a simple picker instead | `pyside6` | `python3-pyside6.qtcore` `python3-pyside6.qtgui` `python3-pyside6.qtwidgets` `python3-pyside6.qtnetwork` | `python3-pyside6` |
+| `kdialog` or `zenity` | (only without PySide6) the simple picker works in the terminal only | `kdialog` / `zenity` | `kdialog` / `zenity` | `kdialog` / `zenity` |
 | `aplay` | non-USB cards get a standard 44.1–192 kHz list instead of their real rates | `alsa-utils` | `alsa-utils` | `alsa-utils` |
 | `notify-send` | no desktop notification after choosing from the launcher | `libnotify` | `libnotify-bin` | `libnotify` |
 | `update-desktop-database` | the launcher may take a moment to show up in the app menu | `desktop-file-utils` | `desktop-file-utils` | `desktop-file-utils` |
@@ -38,14 +57,15 @@ Plus the standard tools every Linux desktop has: `sed`, `awk`, `grep`, `sort`, `
 
 ```bash
 # Arch
-sudo pacman -S --needed pipewire wireplumber jq alsa-utils libnotify
-# Debian / Ubuntu
-sudo apt install pipewire-bin wireplumber jq alsa-utils libnotify-bin
+sudo pacman -S --needed pipewire wireplumber jq alsa-utils libnotify pyside6
+# Debian 13 / Ubuntu 25.10+
+sudo apt install pipewire-bin wireplumber jq alsa-utils libnotify-bin \
+  python3-pyside6.qtcore python3-pyside6.qtgui python3-pyside6.qtwidgets python3-pyside6.qtnetwork
 # Fedora
-sudo dnf install pipewire-utils wireplumber jq alsa-utils libnotify
+sudo dnf install pipewire-utils wireplumber jq alsa-utils libnotify python3-pyside6
 ```
 
-Add `kdialog` (KDE) or `zenity` (GNOME and others) for the picker window.
+Leave out the PySide6 packages if you only want the command line.
 
 ### WirePlumber 0.5: which distros have it
 
@@ -78,9 +98,9 @@ git clone https://github.com/vcostin/dac-rate.git && cd dac-rate
 ./install.sh
 ```
 
-It checks the dependencies first. If something required is missing, it stops and prints the install command. Otherwise it copies `dac-rate` to `~/.local/bin` and adds a **DAC Sample Rate** launcher to your app menu.
+It checks the dependencies first. If something required is missing, it stops and prints the install command. Otherwise it copies `dac-rate` and `dac-rate-gui` to `~/.local/bin` and adds a **DAC Sample Rate** launcher to your app menu. The launcher opens the app when PySide6 is installed, or a simple picker otherwise. If you install PySide6 later, run `./install.sh` again.
 
-## Use
+## Command line
 
 ```bash
 dac-rate devices              # list outputs; * marks the remembered one
@@ -92,7 +112,7 @@ dac-rate reset                # remove the rule, back to PipeWire defaults
 dac-rate status               # rule, hardware rate, and any other config that affects the device
 ```
 
-Or open **DAC Sample Rate** from the app menu and pick from the list. Run `dac-rate` with no arguments in a terminal for the same picker there.
+Run `dac-rate` with no arguments for a simple picker in the terminal. `--json` prints devices, rates and status as JSON, which is what the app reads.
 
 Changing the rate restarts WirePlumber, so sound pauses for about a second. Turning Auto on or off restarts PipeWire as well, and a few apps may need restarting to get sound back.
 
@@ -187,7 +207,7 @@ That file merges in any `default.clock.allowed-rates` you set yourself, always k
 
 ```bash
 dac-rate reset        # for each device you set up
-./install.sh --uninstall
+./install.sh --uninstall   # also removes the app's login item
 ```
 
 ## License

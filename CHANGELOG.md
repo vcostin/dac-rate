@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.0
+
+- New app, `dac-rate-gui` (Qt / PySide6): pick the device, choose Auto / Lock / default, set the advanced options, see the live hardware rate and any conflicting config. Changes apply in the background and errors show in a dialog.
+- Tray icon with the live rate as a badge, and a menu to switch without opening the window. "Start in the tray when I log in" adds a login item. Only one copy runs; launching it again shows the window.
+- The menu launcher opens the app when PySide6 is installed, and the simple picker otherwise. `install.sh` checks for PySide6 and gives the package names per distro; uninstall also removes the login item.
+- `dac-rate --json` for `devices`, `rates` and `status` (used by the app).
+- CI also runs the app's tests offscreen against a fake `dac-rate`.
+
 ## 1.1.1
 
 - README: a Dependencies section with package names for Arch, Debian/Ubuntu and Fedora, install commands, and which distro releases ship WirePlumber 0.5.

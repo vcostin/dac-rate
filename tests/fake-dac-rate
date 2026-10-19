@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Stand-in for dac-rate used by the GUI tests.
+
+Keeps rules in $FAKE_STATE (JSON), logs every call to $FAKE_LOG, and answers
+--json queries the way dac-rate does. Two devices: a USB DAC and onboard audio.
+"""
+import json
+import os
+import sys
+import time
+
+DEVICES = [
+    {"node": "alsa_output.usb-Test_DAC-01.analog-stereo", "description": "Test USB DAC",
+     "card": "90", "pcm": "0", "card_key": "usb-Test_DAC-01", "card_longname": "Test DAC at usb-1", "remembered": False},
+    {"node": "alsa_output.pci-0000_00_1f.3.analog-stereo", "description": "Onboard Audio",
+     "card": "91", "pcm": "0", "card_key": "pci-0000_00_1f.3", "card_longname": "HDA Intel", "remembered": False},
+]
+RATES = {
+    DEVICES[0]["node"]: [44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000],
+    DEVICES[1]["node"]: [44100, 48000, 96000, 192000],
+}
+
+state_file = os.environ["FAKE_STATE"]
+with open(os.environ["FAKE_LOG"], "a") as log:
+    log.write(json.dumps(sys.argv[1:]) + "\n")
+try:
+    with open(state_file) as f:
+        state = json.load(f)
+except (OSError, ValueError):
+    state = {"rules": {}, "remembered": None}
+
+args = sys.argv[1:]
+opts = {}
+rest = []
+i = 0
+while i < len(args):
+    a = args[i]
+    if a in ("-d", "-m", "-q"):
+        opts[a] = args[i + 1]
+        i += 2
+    elif a in ("--json", "-n"):
+        i += 1
+    else:
+        rest.append(a)
+        i += 1
+cmd = rest[0] if rest else ""
+node = opts.get("-d") or state["remembered"]
+
+
+def save():
+    with open(state_file, "w") as f:
+        json.dump(state, f)
+
+
+def status():
+    rule = state["rules"].get(node)
+    conflicts = ["/home/someone/.config/wireplumber/wireplumber.conf.d/99-other-rate-settings.conf:12: "
+                 "audio.allowed-rates = [ 192000 ] (loads after dac-rate, so it wins)",
+                 "runtime clock.force-rate = 48000 forces every device (set by another tool; clear with: "
+                 "pw-metadata -n settings 0 clock.force-rate 0)"] \
+        if os.environ.get("FAKE_CONFLICT") else []
+    d = next(d for d in DEVICES if d["node"] == node)
+    return {"node": node, "connected": True, "description": d["description"], "card": d["card"], "pcm": d["pcm"],
+            "rule": rule, "hw_rate": None, "conflicts": conflicts}
+
+
+if cmd == "devices":
+    out = [dict(d, remembered=(d["node"] == state["remembered"])) for d in DEVICES]
+    print(json.dumps(out))
+elif cmd == "use":
+    state["remembered"] = rest[1]
+    save()
+    print("Using: x")
+elif cmd == "rates":
+    print(json.dumps({"source": "USB descriptor", "rates": RATES[node]}))
+elif cmd == "status":
+    print(json.dumps(status()))
+elif cmd == "set":
+    time.sleep(float(os.environ.get("FAKE_DELAY", "0.3")))
+    value = rest[1]
+    if value != "auto" and int(value) not in RATES[node]:
+        print(f"dac-rate: {value} Hz is not supported by this device", file=sys.stderr)
+        sys.exit(1)
+    if os.environ.get("FAKE_FAIL"):
+        print("dac-rate: this card already has a rule for something else (one rule per card)", file=sys.stderr)
+        sys.exit(1)
+    q = opts.get("-q")
+    state["rules"][node] = {"mode": value, "match": opts.get("-m", "card"),
+                            "quality": None if q in (None, "default") else int(q)}
+    save()
+    print(json.dumps(status()))
+elif cmd == "reset":
+    time.sleep(float(os.environ.get("FAKE_DELAY", "0.3")))
+    state["rules"].pop(node, None)
+    save()
+    print(json.dumps(status()))
+else:
+    print(f"dac-rate: unknown command {cmd}", file=sys.stderr)
+    sys.exit(1)

@@ -5,7 +5,7 @@ on:
   pull_request:
 
 jobs:
-  shellcheck:
+  shell:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,3 +15,21 @@ jobs:
         run: shellcheck --version && shellcheck dac-rate install.sh
       - name: Desktop entry
         run: sudo apt-get install -y -qq desktop-file-utils >/dev/null && desktop-file-validate dac-rate.desktop
+
+  app:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Qt runtime libraries
+        run: sudo apt-get install -y -qq libegl1 libxkbcommon0 libfontconfig1 libglib2.0-0 libdbus-1-3 >/dev/null
+      - name: PySide6
+        run: pip install --quiet PySide6
+      - name: Compile
+        run: python -m py_compile dac-rate-gui tests/fake-dac-rate tests/test_gui.py
+      - name: App tests (offscreen)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m unittest -v tests/test_gui.py

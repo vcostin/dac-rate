@@ -1,0 +1,809 @@
+#!/usr/bin/env python3
+"""dac-rate-gui: a window and tray icon for dac-rate.
+
+All changes go through the dac-rate command, so the app and the command line
+always agree. The live hardware rate is read straight from /proc/asound.
+"""
+
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+
+from PySide6.QtCore import QObject, QProcess, QSettings, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
+from PySide6.QtWidgets import (
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QFormLayout, QFrame,
+    QHBoxLayout, QLabel, QLayout, QMainWindow, QMenu, QMessageBox, QProgressBar,
+    QPushButton, QRadioButton, QSpinBox, QSystemTrayIcon, QToolButton,
+    QVBoxLayout, QWidget,
+)
+
+VERSION = "1.2.0"
+APP_NAME = "DAC Sample Rate"
+MATCH_MODES = [
+    ("card", "Whole card, any profile (recommended)"),
+    ("port", "This card on this USB port only"),
+    ("node", "This output only"),
+]
+AUTOSTART = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "autostart" / "dac-rate-gui.desktop"
+
+
+def find_cli():
+    """dac-rate next to this file (a checkout), else on PATH."""
+    if os.environ.get("DAC_RATE_CLI"):
+        return os.environ["DAC_RATE_CLI"]
+    here = Path(__file__).resolve().parent / "dac-rate"
+    if here.is_file() and os.access(here, os.X_OK):
+        return str(here)
+    return shutil.which("dac-rate")
+
+
+def fmt_rate(hz):
+    khz = hz / 1000
+    return f"{khz:g} kHz"
+
+
+def read_hw_rate(card, pcm):
+    """Rate the device runs at now, or None when it is closed (idle)."""
+    if card in (None, "") or pcm in (None, ""):
+        return None
+    try:
+        text = Path(f"/proc/asound/card{card}/pcm{pcm}p/sub0/hw_params").read_text()
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if line.startswith("rate:"):
+            try:
+                return int(line.split()[1])
+            except (IndexError, ValueError):
+                return None
+    return None
+
+
+def describe_rule(rule):
+    if not rule:
+        return "No dac-rate rule (PipeWire default)"
+    mode = rule["mode"]
+    text = "Auto: follows the content" if mode == "auto" else f"Locked to {fmt_rate(int(mode))}"
+    scope = {"card": "whole card", "port": "this USB port", "node": "this output"}.get(rule.get("match"), rule.get("match"))
+    parts = [text, f"applies to {scope}"]
+    if rule.get("quality") is not None:
+        parts.append(f"quality {rule['quality']}")
+    return " · ".join(parts)
+
+
+class Cli(QObject):
+    """Runs dac-rate asynchronously, one command at a time."""
+
+    finished = Signal(str, object, str, int)  # tag, parsed JSON (or None), stderr, exit code
+
+    def __init__(self, path):
+        super().__init__()
+        self.path = path
+        self.queue = []
+        self.proc = None
+
+    def busy(self):
+        return self.proc is not None
+
+    def run(self, tag, args):
+        # Only one query of each kind needs to wait in line.
+        if tag != "change" and any(t == tag for t, _ in self.queue):
+            return
+        self.queue.append((tag, args))
+        self._next()
+
+    def _next(self):
+        if self.proc is not None or not self.queue:
+            return
+        tag, args = self.queue.pop(0)
+        proc = QProcess(self)
+        proc.setProgram(self.path)
+        proc.setArguments(["--json", *args])
+        proc.setProperty("tag", tag)
+        proc.finished.connect(lambda code, _status, p=proc, t=tag: self._done(p, t, code))
+        proc.errorOccurred.connect(lambda _err, p=proc, t=tag: self._failed(p, t))
+        self.proc = proc
+        proc.start()
+
+    def shutdown(self):
+        """Before quitting: let a change finish (so it is never cut in half), stop queries."""
+        self.queue.clear()
+        proc, self.proc = self.proc, None
+        if proc is None:
+            return
+        proc.blockSignals(True)
+        if proc.property("tag").startswith("change"):
+            proc.waitForFinished(30000)
+        else:
+            proc.kill()
+            proc.waitForFinished(2000)
+
+    def _done(self, proc, tag, code):
+        if proc is not self.proc:
+            return  # stopped by shutdown()
+        out = bytes(proc.readAllStandardOutput()).decode(errors="replace")
+        err = bytes(proc.readAllStandardError()).decode(errors="replace").strip()
+        data = None
+        if out.strip():
+            try:
+                data = json.loads(out)
+            except json.JSONDecodeError:
+                data = None
+        self.proc = None
+        proc.deleteLater()
+        self.finished.emit(tag, data, err, code)
+        self._next()
+
+    def _failed(self, proc, tag):
+        if proc is not self.proc:
+            return
+        if proc.error() == QProcess.ProcessError.FailedToStart:
+            self.proc = None
+            proc.deleteLater()
+            self.finished.emit(tag, None, f"could not run {self.path}", 127)
+            self._next()
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, cli, settings):
+        super().__init__()
+        self.cli = cli
+        self.settings = settings
+        self.tray = None
+        self.devices = []
+        self.node = None          # selected output
+        self.status = None        # last status JSON for it
+        self.rates = []
+        self.rates_source = ""
+        self.applying = False
+        self.quitting = False
+        self._loading = False  # True while the app itself sets the controls
+
+        self.setWindowTitle(APP_NAME)
+        self.setWindowIcon(QIcon.fromTheme("audio-card"))
+        self._build()
+        cli.finished.connect(self._on_cli)
+
+        self.hw_timer = QTimer(self, interval=1000, timeout=self._update_hw)
+        self.hw_timer.start()
+        self.dev_timer = QTimer(self, interval=5000, timeout=self.refresh_devices)
+        self.dev_timer.start()
+        self.refresh_devices()
+
+    # --- layout -------------------------------------------------------------
+
+    def _build(self):
+        root = QWidget()
+        lay = QVBoxLayout(root)
+        lay.setContentsMargins(18, 16, 18, 16)
+        lay.setSpacing(12)
+        # The window may never be smaller than its content (no clipped text).
+        lay.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Output device:"))
+        self.device_combo = QComboBox()
+        self.device_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.device_combo.setMinimumContentsLength(24)
+        self.device_combo.activated.connect(self._on_device_chosen)
+        row.addWidget(self.device_combo, 1)
+        refresh = QToolButton(icon=QIcon.fromTheme("view-refresh"), toolTip="Look for devices again")
+        if refresh.icon().isNull():
+            refresh.setText("Refresh")
+        refresh.clicked.connect(self.refresh_devices)
+        row.addWidget(refresh)
+        lay.addLayout(row)
+
+        # Live rate card
+        card = QFrame(frameShape=QFrame.Shape.StyledPanel)
+        card_lay = QVBoxLayout(card)
+        card_lay.setContentsMargins(16, 12, 16, 12)
+        self.hw_label = QLabel("—", alignment=Qt.AlignmentFlag.AlignCenter)
+        font = self.hw_label.font()
+        font.setPointSizeF(font.pointSizeF() * 2.6)
+        font.setWeight(QFont.Weight.Bold)
+        self.hw_label.setFont(font)
+        self.hw_note = QLabel("", alignment=Qt.AlignmentFlag.AlignCenter)
+        self.rule_label = QLabel("", alignment=Qt.AlignmentFlag.AlignCenter, wordWrap=True)
+        self.rule_label.setEnabled(False)  # secondary text colour
+        card_lay.addWidget(self.hw_label)
+        card_lay.addWidget(self.hw_note)
+        card_lay.addWidget(self.rule_label)
+        lay.addWidget(card)
+
+        # Choice
+        lay.addWidget(QLabel("<b>Sample rate</b>"))
+        self.mode_group = QButtonGroup(self)
+        self.rb_auto = QRadioButton("Follow the content (Auto)")
+        self.rb_auto.setToolTip("The DAC switches to each file's own rate while one source is playing.")
+        self.rb_lock = QRadioButton("Lock to")
+        self.rb_lock.setToolTip("Everything is resampled once, by PipeWire, to this rate.")
+        self.rb_default = QRadioButton("PipeWire default (remove the dac-rate rule)")
+        for i, rb in enumerate((self.rb_auto, self.rb_lock, self.rb_default)):
+            self.mode_group.addButton(rb, i)
+        self.mode_group.idToggled.connect(self._on_user_change)
+        lay.addWidget(self.rb_auto)
+        lock_row = QHBoxLayout()
+        lock_row.addWidget(self.rb_lock)
+        self.rate_combo = QComboBox()
+        self.rate_combo.currentIndexChanged.connect(self._on_user_change)
+        lock_row.addWidget(self.rate_combo)
+        lock_row.addStretch(1)
+        lay.addLayout(lock_row)
+        lay.addWidget(self.rb_default)
+
+        # Advanced
+        self.adv_toggle = QToolButton(text="Advanced", checkable=True)
+        self.adv_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.adv_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.adv_toggle.setAutoRaise(True)
+        self.adv_toggle.toggled.connect(self._toggle_advanced)
+        lay.addWidget(self.adv_toggle)
+        self.adv = QWidget(visible=False)
+        form = QFormLayout(self.adv)
+        form.setContentsMargins(22, 0, 0, 0)
+        self.match_combo = QComboBox()
+        for key, text in MATCH_MODES:
+            self.match_combo.addItem(text, key)
+        self.match_combo.setToolTip("Which outputs the rule applies to. 'Whole card' keeps working after a profile change.")
+        self.match_combo.currentIndexChanged.connect(self._on_user_change)
+        form.addRow("Applies to:", self.match_combo)
+        self.quality_spin = QSpinBox(minimum=-1, maximum=14)
+        self.quality_spin.setSpecialValueText("PipeWire default (4)")
+        self.quality_spin.setToolTip("Resampler quality: higher sounds cleaner and uses more CPU. 10 is a good high setting.")
+        self.quality_spin.valueChanged.connect(self._on_user_change)
+        form.addRow("Resampler quality:", self.quality_spin)
+        self.source_label = QLabel(wordWrap=True)
+        self.source_label.setEnabled(False)
+        form.addRow("Rates from:", self.source_label)
+        lay.addWidget(self.adv)
+
+        # Warnings
+        self.warn_box = QLabel(wordWrap=True, visible=False, textFormat=Qt.TextFormat.RichText)
+        self.warn_box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.warn_box.setStyleSheet(
+            "QLabel { background: rgba(240, 170, 0, 0.16); border: 1px solid rgba(240, 170, 0, 0.55);"
+            " border-radius: 6px; padding: 8px; }")
+        lay.addWidget(self.warn_box)
+
+        # Tray options
+        self.cb_tray = QCheckBox("Keep running in the system tray when the window is closed")
+        self.cb_tray.setChecked(self.settings.value("tray", True, type=bool))
+        self.cb_tray.toggled.connect(self._on_tray_option)
+        self.cb_autostart = QCheckBox("Start in the tray when I log in")
+        self.cb_autostart.setChecked(AUTOSTART.exists())
+        self.cb_autostart.toggled.connect(self._on_autostart)
+        lay.addWidget(self.cb_tray)
+        lay.addWidget(self.cb_autostart)
+
+        # Bottom bar
+        bottom = QHBoxLayout()
+        self.progress = QProgressBar(maximum=0, visible=False, textVisible=False)
+        self.progress.setMaximumWidth(90)
+        self.msg = QLabel("", wordWrap=True)
+        self.msg.setEnabled(False)
+        self.apply_btn = QPushButton(QIcon.fromTheme("dialog-ok-apply"), "Apply")
+        self.apply_btn.setDefault(True)
+        self.apply_btn.clicked.connect(lambda: self.apply())
+        bottom.addWidget(self.progress)
+        bottom.addWidget(self.msg, 1)
+        bottom.addWidget(self.apply_btn)
+        lay.addLayout(bottom)
+
+        self.setCentralWidget(root)
+        root.setMinimumWidth(480)
+        self.resize(520, 0)
+
+    def _toggle_advanced(self, on):
+        self.adv_toggle.setArrowType(Qt.ArrowType.DownArrow if on else Qt.ArrowType.RightArrow)
+        self.adv.setVisible(on)
+        self._fit_height(shrink=not on)
+
+    def _fit_height(self, shrink=False):
+        """Grow (or shrink) in height to fit the content; keep the user's width."""
+        def fit():
+            need = self.centralWidget().heightForWidth(self.centralWidget().width())
+            need = max(need, self.minimumSizeHint().height())
+            if need > self.height() or shrink:
+                self.resize(self.width(), need)
+        QTimer.singleShot(0, fit)
+
+    # --- data ---------------------------------------------------------------
+
+    def refresh_devices(self):
+        if not self.applying:
+            self.cli.run("devices", ["devices"])
+
+    def refresh_status(self):
+        if self.node and not self.applying:
+            self.cli.run(f"status|{self.node}", ["-d", self.node, "status"])
+
+    def _on_cli(self, tag, data, err, code):
+        kind, _, node = tag.partition("|")
+        if node and node != self.node:
+            return  # answer for a device that is no longer selected
+        if kind == "devices":
+            self._on_devices(data if code == 0 and isinstance(data, list) else [], err if code else "")
+        elif kind == "status":
+            if code == 0 and isinstance(data, dict):
+                self._on_status(data)
+            elif self.node:
+                self._show_message(err.removeprefix("dac-rate: ") or "Could not read the device status.", error=True)
+        elif kind == "rates":
+            if code == 0 and isinstance(data, dict):
+                self.rates = data.get("rates", [])
+                self.rates_source = data.get("source", "")
+                self._fill_rates()
+        elif kind == "change":
+            self._on_applied(data, err, code)
+
+    def _on_devices(self, devices, err):
+        old = [d["node"] for d in self.devices]
+        self.devices = devices
+        if [d["node"] for d in devices] != old:
+            self.device_combo.blockSignals(True)
+            self.device_combo.clear()
+            for d in devices:
+                self.device_combo.addItem(QIcon.fromTheme("audio-card"), d["description"], d["node"])
+            self.device_combo.blockSignals(False)
+        if not devices:
+            self.node = None
+            self.status = None
+            self.hw_label.setText("—")
+            self.hw_note.setText(err or "No playback devices found")
+            self.rule_label.setText("")
+            self._sync_controls()
+            self._update_tray()
+            return
+        nodes = [d["node"] for d in devices]
+        if self.node not in nodes:
+            pick = next((d for d in devices if d.get("remembered")), None) \
+                or next((d for d in devices if "usb" in d["node"]), None) or devices[0]
+            self._select(pick["node"])
+        else:
+            self.device_combo.setCurrentIndex(nodes.index(self.node))
+
+    def _on_device_chosen(self, index):
+        node = self.device_combo.itemData(index)
+        if node and node != self.node:
+            self._select(node)
+            self.cli.run("use", ["use", node])  # so the command line and the tray agree
+
+    def _select(self, node):
+        self.node = node
+        self.status = None
+        self.rates = []
+        nodes = [d["node"] for d in self.devices]
+        if node in nodes:
+            self.device_combo.setCurrentIndex(nodes.index(node))
+        self.cli.run(f"status|{node}", ["-d", node, "status"])
+        self.cli.run(f"rates|{node}", ["-d", node, "rates"])
+
+    def _on_status(self, st):
+        self.status = st
+        rule = st.get("rule")
+        self.rule_label.setText(describe_rule(rule))
+        self._load_controls_from_rule(rule)
+        conflicts = st.get("conflicts") or []
+        if conflicts:
+            items = "".join(f"<li>{_html(c)}</li>" for c in conflicts)
+            self.warn_box.setText(f"<b>Other settings that affect this device</b><ul style='margin:4px 0 0 -18px'>{items}</ul>")
+        if self.warn_box.isVisibleTo(self) != bool(conflicts):
+            self.warn_box.setVisible(bool(conflicts))
+            self._fit_height(shrink=not conflicts)
+        self._update_hw()
+        self._sync_controls()
+
+    def _current_device(self):
+        return next((d for d in self.devices if d["node"] == self.node), {})
+
+    def _on_user_change(self, *_):
+        if not self._loading:
+            self._show_message("")  # a new choice replaces an old error
+        self._sync_controls()
+
+    def _fill_rates(self):
+        self._loading = True
+        try:
+            self._fill_rates_inner()
+        finally:
+            self._loading = False
+
+    def _fill_rates_inner(self):
+        keep = self.rate_combo.currentData()
+        self.rate_combo.blockSignals(True)
+        self.rate_combo.clear()
+        for r in self.rates:
+            self.rate_combo.addItem(fmt_rate(r), r)
+        self.rate_combo.blockSignals(False)
+        self.source_label.setText(self.rates_source)
+        rule = (self.status or {}).get("rule")
+        want = int(rule["mode"]) if rule and rule["mode"] != "auto" else keep
+        if want is None:
+            want = 192000 if 192000 in self.rates else (self.rates[-1] if self.rates else None)
+        if want in self.rates:
+            self.rate_combo.setCurrentIndex(self.rates.index(want))
+        self._sync_controls()
+        self._update_tray()
+
+    def _load_controls_from_rule(self, rule):
+        """Show the device's current setting in the controls."""
+        self._loading = True
+        try:
+            self._load_controls_inner(rule)
+        finally:
+            self._loading = False
+
+    def _load_controls_inner(self, rule):
+        if not rule:
+            self.rb_default.setChecked(True)
+        elif rule["mode"] == "auto":
+            self.rb_auto.setChecked(True)
+        else:
+            self.rb_lock.setChecked(True)
+            r = int(rule["mode"])
+            if r in self.rates:
+                self.rate_combo.setCurrentIndex(self.rates.index(r))
+        match = (rule or {}).get("match", "card")
+        idx = self.match_combo.findData(match)
+        self.match_combo.setCurrentIndex(max(idx, 0))
+        q = (rule or {}).get("quality")
+        self.quality_spin.setValue(-1 if q is None else int(q))
+
+    # --- state of the controls ------------------------------------------------
+
+    def _wanted(self):
+        """(mode, match, quality) the controls describe; mode is 'auto', a rate, or None."""
+        if self.rb_auto.isChecked():
+            mode = "auto"
+        elif self.rb_lock.isChecked():
+            mode = str(self.rate_combo.currentData()) if self.rate_combo.currentData() else None
+        else:
+            mode = None
+        q = self.quality_spin.value()
+        return mode, self.match_combo.currentData(), (None if q < 0 else q)
+
+    def _changed(self):
+        if self.status is None:
+            return False
+        mode, match, quality = self._wanted()
+        rule = self.status.get("rule")
+        if rule is None:
+            return mode is not None
+        if mode is None:
+            return True
+        return (mode, match, quality) != (rule["mode"], rule.get("match"), rule.get("quality"))
+
+    def _sync_controls(self):
+        ready = self.node is not None and self.status is not None and not self.applying
+        connected = bool(self.status and self.status.get("connected"))
+        for w in (self.rb_auto, self.rb_lock, self.rb_default, self.match_combo,
+                  self.quality_spin, self.device_combo):
+            w.setEnabled(not self.applying and (w is self.device_combo or (ready and connected)))
+        self.rate_combo.setEnabled(ready and connected and self.rb_lock.isChecked())
+        is_default = self.rb_default.isChecked()
+        self.match_combo.setEnabled(self.match_combo.isEnabled() and not is_default)
+        self.quality_spin.setEnabled(self.quality_spin.isEnabled() and not is_default)
+        self.apply_btn.setEnabled(ready and connected and self._changed())
+        if self.applying or self.msg.property("error"):
+            return
+        if ready and self._changed():
+            self._show_message("Applying restarts the audio service: sound pauses for about a second.")
+        else:
+            self._show_message("")
+
+    def _show_message(self, text, error=False):
+        self.msg.setProperty("error", error)
+        self.msg.setEnabled(error)
+        self.msg.setStyleSheet("color: palette(highlighted-text); background: #b3261e; border-radius: 4px; padding: 4px;"
+                               if error else "")
+        self.msg.setText(text)
+
+    # --- live rate --------------------------------------------------------------
+
+    def _update_hw(self):
+        dev = self._current_device()
+        st = self.status or {}
+        if not self.node:
+            return
+        if st and not st.get("connected", True):
+            self.hw_label.setText("—")
+            self.hw_note.setText("Not connected")
+        else:
+            hw = read_hw_rate(dev.get("card"), dev.get("pcm"))
+            if hw:
+                self.hw_label.setText(fmt_rate(hw))
+                self.hw_note.setText("Playing now")
+            else:
+                self.hw_label.setText("Idle")
+                self.hw_note.setText("The rate shows when something plays")
+        self._update_tray()
+
+    # --- applying ---------------------------------------------------------------
+
+    def apply(self, mode_override=None):
+        if not self.node or self.applying:
+            return
+        mode, match, quality = self._wanted()
+        if mode_override is not None:
+            mode = None if mode_override == "reset" else mode_override
+            rule = (self.status or {}).get("rule") or {}
+            match = rule.get("match", "card")
+            quality = rule.get("quality")
+        args = ["-d", self.node]
+        if mode is None:
+            args.append("reset")
+        else:
+            args += ["-m", match, "-q", "default" if quality is None else str(quality), "set", mode]
+        self.applying = True
+        self.progress.setVisible(True)
+        self._show_message("Applying… the audio service is restarting.")
+        self._sync_controls()
+        self.cli.run(f"change|{self.node}", args)
+
+    def _on_applied(self, data, err, code):
+        self.applying = False
+        self.progress.setVisible(False)
+        if code != 0:
+            msg = err.removeprefix("dac-rate: ") or "the change failed"
+            self._show_message("The change was not applied.", error=True)
+            QMessageBox.warning(self, APP_NAME, msg[0].upper() + msg[1:])
+        else:
+            self._show_message("")
+            if isinstance(data, dict):
+                self._on_status(data)
+            if self.tray and not self.isVisible():
+                rule = (data or {}).get("rule")
+                self.tray.showMessage(APP_NAME, describe_rule(rule), QSystemTrayIcon.MessageIcon.Information, 2500)
+        self.refresh_devices()
+        self.refresh_status()
+        self._sync_controls()
+
+    # --- tray -------------------------------------------------------------------
+
+    def set_tray(self, tray):
+        self.tray = tray
+        self._update_tray()
+
+    def _update_tray(self):
+        if self.tray:
+            self.tray.update_state(self)
+
+    def _on_tray_option(self, on):
+        self.settings.setValue("tray", on)
+        if self.tray:
+            self.tray.setVisible(on)
+
+    def _on_autostart(self, on):
+        try:
+            if on:
+                AUTOSTART.parent.mkdir(parents=True, exist_ok=True)
+                AUTOSTART.write_text(
+                    "[Desktop Entry]\nType=Application\nName=DAC Sample Rate (tray)\n"
+                    f"Exec={_desktop_quote(_self_command())} --tray\nIcon=audio-card\nX-GNOME-Autostart-enabled=true\n"
+                    "NoDisplay=true\n")
+            else:
+                AUTOSTART.unlink(missing_ok=True)
+        except OSError as e:
+            QMessageBox.warning(self, APP_NAME, f"Could not change the login item: {e}")
+            self.cb_autostart.blockSignals(True)
+            self.cb_autostart.setChecked(AUTOSTART.exists())
+            self.cb_autostart.blockSignals(False)
+
+    def show_and_raise(self):
+        self.show()
+        self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+        self.raise_()
+        self.activateWindow()
+        self.refresh_status()
+
+    def closeEvent(self, event):
+        if self.quitting or not (self.tray and self.tray.isVisible()):
+            event.accept()
+            QApplication.quit()
+            return
+        event.ignore()
+        self.hide()
+        if not self.settings.value("told_about_tray", False, type=bool):
+            self.tray.showMessage(APP_NAME, "Still running in the system tray. Quit from its menu.",
+                                  QSystemTrayIcon.MessageIcon.Information, 4000)
+            self.settings.setValue("told_about_tray", True)
+
+
+class Tray(QSystemTrayIcon):
+    def __init__(self, window):
+        super().__init__(QIcon.fromTheme("audio-card"))
+        self.window = window
+        self.menu = QMenu()
+        self.setContextMenu(self.menu)
+        self.activated.connect(self._on_activated)
+        self._last_key = None
+        self.menu.aboutToShow.connect(self._rebuild_menu)
+        self._rebuild_menu()
+
+    def _on_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            if self.window.isVisible() and self.window.isActiveWindow():
+                self.window.close()
+            else:
+                self.window.show_and_raise()
+
+    def update_state(self, w):
+        dev = w._current_device()
+        hw = read_hw_rate(dev.get("card"), dev.get("pcm")) if dev else None
+        rule = (w.status or {}).get("rule")
+        key = (dev.get("node"), hw, json.dumps(rule, sort_keys=True))
+        if key == self._last_key:
+            return
+        self._last_key = key
+        self.setIcon(_tray_icon(hw))
+        name = dev.get("description", "No device")
+        now = fmt_rate(hw) if hw else "idle"
+        self.setToolTip(f"{name}\nNow: {now}\n{describe_rule(rule)}")
+
+    def _rebuild_menu(self):
+        w = self.window
+        m = self.menu
+        m.clear()
+        dev = w._current_device()
+        title = m.addAction(dev.get("description", "No device"))
+        title.setEnabled(False)
+        hw = read_hw_rate(dev.get("card"), dev.get("pcm")) if dev else None
+        now = m.addAction(f"Now: {fmt_rate(hw)}" if hw else "Now: idle")
+        now.setEnabled(False)
+        m.addSeparator()
+
+        rule = (w.status or {}).get("rule")
+        current = rule["mode"] if rule else "reset"
+        group = QActionGroup(m)
+        can_change = bool(w.node and w.status and w.status.get("connected") and not w.applying)
+
+        def add(label, value):
+            a = QAction(label, m, checkable=True, checked=(value == current), enabled=can_change)
+            a.triggered.connect(lambda _=False, v=value: w.apply(mode_override=v))
+            group.addAction(a)
+            m.addAction(a)
+
+        add("Follow the content (Auto)", "auto")
+        if w.rates:
+            locked = current not in ("auto", "reset")
+            lock = m.addMenu(f"Locked: {fmt_rate(int(current))}" if locked else "Lock to")
+            lock.setEnabled(can_change)
+            for r in w.rates:
+                a = QAction(fmt_rate(r), lock, checkable=True, checked=(str(r) == current))
+                a.triggered.connect(lambda _=False, v=str(r): w.apply(mode_override=v))
+                group.addAction(a)
+                lock.addAction(a)
+        add("PipeWire default", "reset")
+        m.addSeparator()
+        m.addAction(QIcon.fromTheme("configure"), "Open window…", w.show_and_raise)
+        m.addAction(QIcon.fromTheme("application-exit"), "Quit", _quit)
+
+
+def _tray_icon(hw):
+    """Theme icon, with the running rate as a small badge while playing."""
+    base = QIcon.fromTheme("audio-card")
+    if not hw:
+        return base
+    size = 64
+    pix = base.pixmap(size, size) if not base.isNull() else QPixmap(size, size)
+    if base.isNull():
+        pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    text = f"{hw // 1000}"
+    font = QFont()
+    font.setBold(True)
+    # Big enough to read at tray size (about 22 px).
+    font.setPixelSize(40 if len(text) <= 2 else 33)
+    font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, -1)
+    p.setFont(font)
+    rect = pix.rect().adjusted(0, size * 3 // 10, 0, 0)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(20, 110, 200))
+    p.drawRoundedRect(rect, 12, 12)
+    p.setPen(QColor("white"))
+    p.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+    p.end()
+    return QIcon(pix)
+
+
+def _desktop_quote(path):
+    """Quote an Exec path per the desktop entry spec when needed."""
+    if not any(c in path for c in ' \t"\'\\$`'):
+        return path
+    escaped = path.replace("\\", "\\\\").replace('"', '\\"').replace("`", "\\`").replace("$", "\\$")
+    return f'"{escaped}"'
+
+
+def _html(s):
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _self_command():
+    exe = shutil.which("dac-rate-gui")
+    me = str(Path(sys.argv[0]).resolve())
+    return exe if exe and Path(exe).resolve() == Path(me) else me
+
+
+def _quit():
+    app = QApplication.instance()
+    for w in app.topLevelWidgets():
+        if isinstance(w, MainWindow):
+            w.quitting = True
+    app.quit()
+
+
+def _on_about_to_quit():
+    for w in QApplication.instance().topLevelWidgets():
+        if isinstance(w, MainWindow):
+            w.hw_timer.stop()
+            w.dev_timer.stop()
+            w.cli.shutdown()
+
+
+def main():
+    if "--version" in sys.argv:
+        print(f"dac-rate-gui {VERSION}")
+        return 0
+    app = QApplication(sys.argv)
+    app.setApplicationName("dac-rate")
+    app.setApplicationDisplayName(APP_NAME)
+    app.setDesktopFileName("dac-rate")
+    app.setQuitOnLastWindowClosed(False)
+    app.aboutToQuit.connect(_on_about_to_quit)
+    start_in_tray = "--tray" in sys.argv
+
+    # One instance: a second launch just shows the running one.
+    server_name = f"dac-rate-gui-{os.getuid()}"
+    sock = QLocalSocket()
+    sock.connectToServer(server_name)
+    if sock.waitForConnected(300):
+        sock.write(b"tray" if start_in_tray else b"show")
+        sock.flush()
+        sock.waitForBytesWritten(300)
+        return 0
+    QLocalServer.removeServer(server_name)
+    server = QLocalServer()
+    server.listen(server_name)
+
+    cli_path = find_cli()
+    if not cli_path:
+        QMessageBox.critical(None, APP_NAME, "The dac-rate command was not found. Run ./install.sh first.")
+        return 1
+
+    settings = QSettings("dac-rate", "dac-rate-gui")
+    window = MainWindow(Cli(cli_path), settings)
+
+    tray = None
+    if QSystemTrayIcon.isSystemTrayAvailable():
+        tray = Tray(window)
+        window.set_tray(tray)
+        tray.setVisible(settings.value("tray", True, type=bool))
+    else:
+        window.cb_tray.setEnabled(False)
+        window.cb_tray.setToolTip("No system tray found on this desktop.")
+        window.cb_autostart.setEnabled(False)
+
+    def on_connection():
+        conn = server.nextPendingConnection()
+        if conn is None:
+            return
+        conn.waitForReadyRead(300)
+        if bytes(conn.readAll()) != b"tray":
+            window.show_and_raise()
+        conn.disconnectFromServer()
+
+    server.newConnection.connect(on_connection)
+
+    if not (start_in_tray and tray and tray.isVisible()):
+        window.show()
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

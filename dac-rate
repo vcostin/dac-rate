@@ -7,7 +7,7 @@
 # global allowed list (user config).
 set -euo pipefail
 
-VERSION=1.1.1
+VERSION=1.2.0
 CONF_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 STATE_DIR="$CONF_HOME/dac-rate"
 DEVICE_FILE="$STATE_DIR/device"
@@ -41,6 +41,7 @@ Options:
   -q, --quality N       Resampler quality 0-14 (PipeWire default 4; 10 is high);
                         "default" removes it. Kept for later 'set' calls.
   -n, --no-restart      Write the rule but do not restart the audio services
+  -j, --json            Print devices, rates and status as JSON (for the app)
 
 Environment: DAC_RATE_GUI=1 forces the picker window, DAC_RATE_GUI=0 the terminal.
 EOF
@@ -370,6 +371,13 @@ label() {
 cmd_devices() {
   local saved=""
   [[ -s $DEVICE_FILE ]] && saved=$(<"$DEVICE_FILE")
+  if [[ ${OPT_JSON:-0} == 1 ]]; then
+    list_devices | jq -R -s --arg saved "$saved" '
+      split("\n") | map(select(length > 0) | split("\t")
+        | {node: .[0], description: .[1], card: .[2], pcm: .[3],
+           card_key: .[4], card_longname: .[5], remembered: (.[0] == $saved)})'
+    return
+  fi
   list_devices | while IFS=$'\t' read -r name desc _; do
     if [[ $name == "$saved" ]]; then printf '* '; else printf '  '; fi
     printf '%-45s %s\n' "$desc" "$name"
@@ -397,6 +405,11 @@ cmd_rates() {
   local node out
   node=$(require_device)
   out=$(probe_rates "$node")
+  if [[ ${OPT_JSON:-0} == 1 ]]; then
+    jq -n --arg source "${out%%$'\t'*}" --arg rates "${out#*$'\t'}" \
+      '{source: $source, rates: ($rates | split(" ") | map(select(length > 0) | tonumber))}'
+    return
+  fi
   echo "${out#*$'\t'}"
   echo "(source: ${out%%$'\t'*})" >&2
 }
@@ -451,6 +464,10 @@ cmd_status() {
   local node info hw extra="" c line
   node=$(require_device)
   info=$(device_info "$node")
+  if [[ ${OPT_JSON:-0} == 1 ]]; then
+    status_json "$node" "$info"
+    return
+  fi
   printf 'Device: %s\n' "$( [[ -n $info ]] && cut -f2 <<<"$info" || echo "$node (not connected)")"
   if [[ -n $(rule_mode "$node") ]]; then
     c=$(rule_meta "$node" match)
@@ -467,6 +484,30 @@ cmd_status() {
     echo "Other settings that affect this device:"
     while IFS= read -r line; do echo "  - $line"; done <<<"$c"
   fi
+}
+
+status_json() {  # node.name info-line
+  local node=$1 info=$2 mode=""
+  mode=$(rule_mode "$node")
+  jq -n \
+    --arg node "$node" \
+    --arg info "$info" \
+    --arg mode "$mode" \
+    --arg match "$( [[ -n $mode ]] && rule_meta "$node" match)" \
+    --arg quality "$( [[ -n $mode ]] && rule_meta "$node" quality)" \
+    --arg hw "$(hw_rate "$node")" \
+    --arg conflicts "$(conflicts "$node")" '
+    ($info | split("\t")) as $i
+    | {node: (if $info == "" then $node else $i[0] end),
+       connected: ($info != ""),
+       description: (if $info == "" then $node else $i[1] end),
+       card: (if $info == "" then null else $i[2] end),
+       pcm: (if $info == "" then null else $i[3] end),
+       rule: (if $mode == "" then null else
+                {mode: $mode, match: (if $match == "" then "node" else $match end),
+                 quality: (if $quality == "" then null else ($quality | tonumber) end)} end),
+       hw_rate: (if $hw == "" then null else ($hw | tonumber) end),
+       conflicts: ($conflicts | split("\n") | map(select(length > 0)))}'
 }
 
 pick_device_gui() {
@@ -558,7 +599,7 @@ cmd_pick() {
 }
 
 main() {
-  OPT_DEVICE="" OPT_NO_RESTART=0 OPT_MATCH=""
+  OPT_DEVICE="" OPT_NO_RESTART=0 OPT_MATCH="" OPT_JSON=0
   unset OPT_QUALITY
   local args=()
   while (( $# )); do
@@ -569,6 +610,7 @@ main() {
       -m|--match) OPT_MATCH=$2; shift 2 ;;
       -q|--quality) OPT_QUALITY=$2; shift 2 ;;
       -n|--no-restart) OPT_NO_RESTART=1; shift ;;
+      -j|--json) OPT_JSON=1; shift ;;
       *) args+=("$1"); shift ;;
     esac
   done

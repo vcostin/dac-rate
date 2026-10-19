@@ -7,7 +7,13 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 BIN="$HOME/.local/bin/dac-rate"
+GUI="$HOME/.local/bin/dac-rate-gui"
 APP="${XDG_DATA_HOME:-$HOME/.local/share}/applications/dac-rate.desktop"
+LOGIN_ITEM="${XDG_CONFIG_HOME:-$HOME/.config}/autostart/dac-rate-gui.desktop"
+
+has_pyside6() {
+  command -v python3 >/dev/null && python3 -c 'import PySide6.QtWidgets, PySide6.QtNetwork' 2>/dev/null
+}
 
 refresh_menu() {
   if command -v update-desktop-database >/dev/null; then
@@ -40,6 +46,12 @@ pkg() {
     aplay) echo alsa-utils ;;
     notify-send) case $fam in debian) echo libnotify-bin ;; *) echo libnotify ;; esac ;;
     update-desktop-database) echo desktop-file-utils ;;
+    pyside6)
+      case $fam in
+        arch) echo pyside6 ;;
+        debian) echo "python3-pyside6.qtcore python3-pyside6.qtgui python3-pyside6.qtwidgets python3-pyside6.qtnetwork" ;;
+        *) echo python3-pyside6 ;;
+      esac ;;
     *) echo "$cmd" ;;
   esac
 }
@@ -86,8 +98,10 @@ check_deps() {
     echo "Note: no systemd user session; after changing a rate, log out and back in to apply it."
   fi
 
+  has_pyside6 \
+    || optional+=("$(pkg pyside6 "$fam") (the app window and tray icon; without it the launcher opens a simple picker)")
   command -v kdialog >/dev/null || command -v zenity >/dev/null \
-    || optional+=("kdialog or zenity (picker window; without it the picker runs in the terminal)")
+    || optional+=("kdialog or zenity (simple picker without PySide6; otherwise the picker runs in the terminal)")
   command -v aplay >/dev/null \
     || optional+=("$(pkg aplay "$fam") (exact rates for non-USB cards)")
   command -v notify-send >/dev/null \
@@ -103,9 +117,10 @@ check_deps() {
 }
 
 if [[ ${1:-} == --uninstall ]]; then
-  rm -f "$BIN" "$APP"
+  pkill -f "$GUI" 2>/dev/null || true
+  rm -f "$BIN" "$GUI" "$APP" "$LOGIN_ITEM"
   refresh_menu
-  echo "Removed $BIN and $APP"
+  echo "Removed $BIN, $GUI, the menu launcher and the login item"
   echo "Rules left in ~/.config/wireplumber/wireplumber.conf.d/60-dac-rate-*.conf (delete them to undo the rates)."
   exit 0
 fi
@@ -114,11 +129,20 @@ check_deps || exit 1
 [[ ${1:-} == --check ]] && exit 0
 
 install -Dm755 dac-rate "$BIN"
+install -Dm755 dac-rate-gui "$GUI"
 install -Dm644 dac-rate.desktop "$APP"
-# Use the absolute path so the launcher works even if ~/.local/bin is not on PATH.
-sed -i "s|^Exec=.*|Exec=$BIN|" "$APP"
+# The launcher opens the app when PySide6 is there, else the simple picker.
+# Absolute paths, so it works even if ~/.local/bin is not on PATH.
+if has_pyside6; then launcher=$GUI; else launcher=$BIN; fi
+sed -i "s|^Exec=.*|Exec=\"$launcher\"|" "$APP"
 refresh_menu
 
-echo "Installed $BIN"
-echo "Next: dac-rate devices; dac-rate use <device>; dac-rate set 96000 (or auto)"
+echo "Installed $BIN and $GUI"
+if has_pyside6; then
+  echo "Open 'DAC Sample Rate' from your app menu, or run: dac-rate-gui"
+else
+  echo "PySide6 is not installed, so the menu launcher opens the simple picker."
+  echo "For the full app, install it and run ./install.sh again."
+fi
+echo "Command line: dac-rate devices; dac-rate use <device>; dac-rate set 96000 (or auto)"
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) echo "Note: ~/.local/bin is not on your PATH." ;; esac
