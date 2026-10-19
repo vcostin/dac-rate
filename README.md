@@ -9,13 +9,59 @@ By default PipeWire runs most outputs at 48 kHz and resamples everything to that
 
 It runs as your user, needs no root, and only touches the device you pick.
 
-## Requirements
+## Dependencies
 
-- PipeWire with **WirePlumber 0.5 or newer** (check with `wireplumber --version`)
-- `jq`
-- systemd user services, to restart the audio services when the rate changes. Without systemd, log out and back in to apply a change.
-- Optional: `kdialog` (KDE) or `zenity` (GNOME and others) for the picker window. Without them it asks in the terminal.
-- Optional: `aplay` (alsa-utils), to read the exact rates of non-USB cards.
+Most of these come with any desktop that uses PipeWire. Usually you only need to install `jq`, and check that your WirePlumber is 0.5 or newer. `./install.sh --check` checks all of this without installing anything. It lists what's missing and prints the install command for your distro (Arch, Debian/Ubuntu or Fedora family).
+
+### Required
+
+| What | Used for | Arch | Debian / Ubuntu | Fedora |
+|---|---|---|---|---|
+| bash 4+ | the script itself | `bash` | `bash` | `bash` |
+| `pw-dump`, `pw-cat`, `pw-metadata` | find devices, show the hardware rate, warn about a forced rate | `pipewire` | `pipewire-bin` | `pipewire-utils` |
+| **WirePlumber 0.5+** | reads the rules dac-rate writes | `wireplumber` | `wireplumber` | `wireplumber` |
+| `jq` | reads PipeWire's device list | `jq` | `jq` | `jq` |
+| systemd user session | restarts the audio services to apply a change (without it, log out and back in) | built in | built in | built in |
+
+Plus the standard tools every Linux desktop has: `sed`, `awk`, `grep`, `sort`, `xargs`, `timeout`.
+
+### Optional
+
+| What | Without it | Arch | Debian / Ubuntu | Fedora |
+|---|---|---|---|---|
+| `kdialog` or `zenity` | the picker works in the terminal only | `kdialog` / `zenity` | `kdialog` / `zenity` | `kdialog` / `zenity` |
+| `aplay` | non-USB cards get a standard 44.1–192 kHz list instead of their real rates | `alsa-utils` | `alsa-utils` | `alsa-utils` |
+| `notify-send` | no desktop notification after choosing from the launcher | `libnotify` | `libnotify-bin` | `libnotify` |
+| `update-desktop-database` | the launcher may take a moment to show up in the app menu | `desktop-file-utils` | `desktop-file-utils` | `desktop-file-utils` |
+
+### Install them
+
+```bash
+# Arch
+sudo pacman -S --needed pipewire wireplumber jq alsa-utils libnotify
+# Debian / Ubuntu
+sudo apt install pipewire-bin wireplumber jq alsa-utils libnotify-bin
+# Fedora
+sudo dnf install pipewire-utils wireplumber jq alsa-utils libnotify
+```
+
+Add `kdialog` (KDE) or `zenity` (GNOME and others) for the picker window.
+
+### WirePlumber 0.5: which distros have it
+
+Check yours with `wireplumber --version`. dac-rate refuses to run on 0.4, which uses a different config format.
+
+| Distro | WirePlumber | Works? |
+|---|---|---|
+| Arch, EndeavourOS | 0.5.18 | yes |
+| Fedora 43, 44, 45 | 0.5.14–0.5.18 | yes |
+| Debian 13 (trixie) | 0.5.8 | yes |
+| Debian 12 (bookworm) | 0.4.13 | only with `bookworm-backports` (0.5.8) |
+| Ubuntu 25.10, 26.04 LTS | 0.5.10, 0.5.13 | yes |
+| Ubuntu 24.04 LTS | 0.4.17 | no |
+| Ubuntu 22.04 LTS | 0.4.8 | no (and PipeWire isn't the default there) |
+
+Versions were checked on the distros' package sites in October 2026.
 
 Tested on Arch Linux, KDE Plasma 6 (Wayland), PipeWire 1.6, WirePlumber 0.5.18, with a Fosi Audio SK02 USB DAC. The lock holds after a reboot, after turning the DAC off and on, and after switching the card's profile.
 
@@ -32,7 +78,7 @@ git clone https://github.com/vcostin/dac-rate.git && cd dac-rate
 ./install.sh
 ```
 
-This copies `dac-rate` to `~/.local/bin` and adds a **DAC Sample Rate** launcher to your app menu.
+It checks the dependencies first. If something required is missing, it stops and prints the install command. Otherwise it copies `dac-rate` to `~/.local/bin` and adds a **DAC Sample Rate** launcher to your app menu.
 
 ## Use
 

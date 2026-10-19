@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.1
+
+- README: a Dependencies section with package names for Arch, Debian/Ubuntu and Fedora, install commands, and which distro releases ship WirePlumber 0.5.
+- `install.sh` checks all dependencies (including the WirePlumber version and bash 4), lists everything missing at once with the install command for your distro, and notes missing optional tools. `./install.sh --check` only checks.
+
 ## 1.1.0
 
 - Rules now match the whole card by default (`-m card`), so they keep working after a profile change (Analog, Digital, Pro Audio). `-m port` matches one card on one USB port (for identical DACs); `-m node` matches one exact output.

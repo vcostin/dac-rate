@@ -7,7 +7,7 @@
 # global allowed list (user config).
 set -euo pipefail
 
-VERSION=1.1.0
+VERSION=1.1.1
 CONF_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 STATE_DIR="$CONF_HOME/dac-rate"
 DEVICE_FILE="$STATE_DIR/device"
