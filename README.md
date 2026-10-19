@@ -15,7 +15,13 @@ It runs as your user, needs no root, and only touches the device you pick.
 - `jq`
 - Optional: `kdialog` (KDE) or `zenity` (GNOME and others) for the picker window. Without them it asks in the terminal.
 
-Tested on Arch Linux, KDE Plasma 6 (Wayland), PipeWire 1.6, WirePlumber 0.5.18, with a USB DAC.
+Tested on Arch Linux, KDE Plasma 6 (Wayland), PipeWire 1.6, WirePlumber 0.5.18, with a Fosi Audio SK02 USB DAC. The lock holds after a reboot and after turning the DAC off and on.
+
+<p align="center">
+  <img src="docs/fosi-sk02-192k.jpg" width="280" alt="Fosi Audio SK02 with its 192 kHz PCM light on">
+  <br>
+  <em>Fosi Audio SK02 after <code>dac-rate set 192000</code>: the DAC's own PCM light shows 192.</em>
+</p>
 
 ## Install
 
