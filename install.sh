@@ -8,9 +8,15 @@ cd "$(dirname "$0")"
 BIN="$HOME/.local/bin/dac-rate"
 APP="${XDG_DATA_HOME:-$HOME/.local/share}/applications/dac-rate.desktop"
 
+refresh_menu() {
+  if command -v update-desktop-database >/dev/null; then
+    update-desktop-database -q "$(dirname "$APP")" || true
+  fi
+}
+
 if [[ ${1:-} == --uninstall ]]; then
   rm -f "$BIN" "$APP"
-  command -v update-desktop-database >/dev/null && update-desktop-database -q "$(dirname "$APP")" || true
+  refresh_menu
   echo "Removed $BIN and $APP"
   echo "Rules left in ~/.config/wireplumber/wireplumber.conf.d/60-dac-rate-*.conf (delete them to undo the rates)."
   exit 0
@@ -24,7 +30,7 @@ install -Dm755 dac-rate "$BIN"
 install -Dm644 dac-rate.desktop "$APP"
 # Use the absolute path so the launcher works even if ~/.local/bin is not on PATH.
 sed -i "s|^Exec=.*|Exec=$BIN|" "$APP"
-command -v update-desktop-database >/dev/null && update-desktop-database -q "$(dirname "$APP")" || true
+refresh_menu
 
 echo "Installed $BIN"
 echo "Next: dac-rate devices; dac-rate use <device>; dac-rate set 96000 (or auto)"
