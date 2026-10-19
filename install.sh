@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install dac-rate for the current user (no root needed).
 #   ./install.sh            install
-#   ./install.sh --uninstall  remove the program (rules you created stay; run 'dac-rate reset' first to drop them)
+#   ./install.sh --uninstall  remove the program (rules stay; run 'dac-rate reset' first to drop them)
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -10,6 +10,7 @@ APP="${XDG_DATA_HOME:-$HOME/.local/share}/applications/dac-rate.desktop"
 
 if [[ ${1:-} == --uninstall ]]; then
   rm -f "$BIN" "$APP"
+  command -v update-desktop-database >/dev/null && update-desktop-database -q "$(dirname "$APP")" || true
   echo "Removed $BIN and $APP"
   echo "Rules left in ~/.config/wireplumber/wireplumber.conf.d/60-dac-rate-*.conf (delete them to undo the rates)."
   exit 0

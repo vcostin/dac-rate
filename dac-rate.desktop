@@ -5,6 +5,6 @@ Exec=dac-rate
 Icon=audio-card
 Terminal=false
 Type=Application
-Categories=Audio;AudioVideo;Settings;
+Categories=AudioVideo;Audio;Mixer;
 Keywords=dac;sample;rate;pipewire;wireplumber;alsa;usb;hi-res;
 StartupNotify=false

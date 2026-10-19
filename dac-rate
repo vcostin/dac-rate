@@ -2,44 +2,52 @@
 # dac-rate: pick the sample rate of an ALSA output (USB DAC, sound card) under
 # PipeWire + WirePlumber 0.5, and keep it across reboots and replugs.
 #
-# It writes one WirePlumber rule per device that sets audio.allowed-rates on
-# that device's node. No root, no global PipeWire changes.
+# It writes one WirePlumber rule per card that sets audio.allowed-rates on that
+# card's playback nodes. No root. Auto mode also adds the rates to PipeWire's
+# global allowed list (user config).
 set -euo pipefail
 
-VERSION=1.0.0
+VERSION=1.1.0
 CONF_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 STATE_DIR="$CONF_HOME/dac-rate"
 DEVICE_FILE="$STATE_DIR/device"
 WP_DIR="$CONF_HOME/wireplumber/wireplumber.conf.d"
-# Auto mode also needs the rates in PipeWire's global allowed list, or the
-# graph never leaves 48 kHz.
-PW_FILE="$CONF_HOME/pipewire/pipewire.conf.d/60-dac-rate.conf"
+PW_DIR="$CONF_HOME/pipewire/pipewire.conf.d"
+PW_FILE="$PW_DIR/60-dac-rate.conf"
+# Rates offered when probing finds a range rather than a list.
+STD_RATES=(32000 44100 48000 88200 96000 176400 192000 352800 384000 705600 768000)
 FALLBACK_RATES=(44100 48000 88200 96000 176400 192000)
 
 usage() {
   cat <<'EOF'
-Usage: dac-rate [command] [args]
+Usage: dac-rate [options] [command] [args]
 
   (no command)        Open a picker (kdialog, zenity, or terminal)
   devices             List ALSA playback devices
   use DEVICE          Remember DEVICE (node name, or part of its description)
-  rates               Show the rates the device supports
+  rates               Show the rates the device supports, and where that came from
   set RATE            Lock the device to RATE Hz (everything is resampled to it)
   set auto            Follow the content: the device switches to each file's rate
   reset               Remove the rule; PipeWire defaults apply again
-  status              Show the rule and the rate the hardware is running at
+  status              Show the rule, the hardware rate, and any conflicting config
   version | help
 
 Options:
-  -d, --device DEVICE Act on DEVICE instead of the remembered one
-  -n, --no-restart    Write the rule but do not restart WirePlumber
+  -d, --device DEVICE   Act on DEVICE instead of the remembered one
+  -m, --match MODE      How the rule finds the device (kept for later 'set' calls):
+                          card  every output of this card, any profile (default)
+                          port  this card on this USB port only (identical DACs)
+                          node  this exact output only
+  -q, --quality N       Resampler quality 0-14 (PipeWire default 4; 10 is high);
+                        "default" removes it. Kept for later 'set' calls.
+  -n, --no-restart      Write the rule but do not restart the audio services
 
-The choice is stored as a WirePlumber rule in
-~/.config/wireplumber/wireplumber.conf.d/60-dac-rate-<device>.conf
+Environment: DAC_RATE_GUI=1 forces the picker window, DAC_RATE_GUI=0 the terminal.
 EOF
 }
 
 die() { echo "dac-rate: $*" >&2; exit 1; }
+warn() { echo "dac-rate: $*" >&2; }
 
 need() {
   local c
@@ -50,43 +58,54 @@ need() {
 
 check_wireplumber() {
   local v
-  v=$(wireplumber --version 2>/dev/null | awk '/libwireplumber/ { print $NF; exit }')
+  v=$(wireplumber --version 2>/dev/null | awk '/libwireplumber/ && !done { print $NF; done = 1 }')
   [[ -n $v ]] || return 0
   case $v in
     0.[0-4].*) die "WirePlumber $v found; 0.5 or newer is required (older versions use Lua config)" ;;
   esac
 }
 
-notify() {
-  command -v notify-send >/dev/null || return 0
-  notify-send --app-name="DAC rate" --icon=audio-card "DAC rate" "$1" || true
+notify() {  # only from the picker window; the command line prints status instead
+  [[ ${NOTIFY:-0} == 1 ]] && command -v notify-send >/dev/null || return 0
+  notify-send --app-name="DAC rate" --icon=audio-card "DAC rate" "$1" 2>/dev/null || true
 }
 
 # --- device discovery ------------------------------------------------------
 
-# TSV: node.name, description, alsa card, alsa device
+# TSV per playback node:
+#   1 node.name  2 description  3 alsa card  4 alsa pcm device
+#   5 card key (device.name without "alsa_card.")  6 card long name
 list_devices() {
   pw-dump 2>/dev/null | jq -r '
-    .[] | select(.type == "PipeWire:Interface:Node") | .info.props
+    (map(select(.type == "PipeWire:Interface:Device"))
+     | map({key: (.id | tostring), value: (.info.props."device.name" // "")})
+     | from_entries) as $dev
+    | .[] | select(.type == "PipeWire:Interface:Node") | .info.props
     | select(."media.class" == "Audio/Sink" and (."node.name" // "" | startswith("alsa_output.")))
     | [."node.name", (."node.description" // ."node.name"),
        ((."api.alsa.pcm.card" // ."alsa.card" // "") | tostring),
-       ((."alsa.device" // 0) | tostring)]
-    | @tsv'
+       ((."alsa.device" // 0) | tostring),
+       (($dev[(."device.id" // "" | tostring)] // "") | sub("^alsa_card\\."; "")),
+       (."api.alsa.card.longname" // "")]
+    | map(gsub("\t"; " ")) | @tsv'
 }
+
+# Card key from a node name when the card object is not available:
+# alsa_output.usb-Foo-01.analog-stereo -> usb-Foo-01
+key_from_node() { sed 's/^alsa_output\.//; s/\.[^.]*$//' <<<"$1"; }
 
 resolve_device() {
   local want=$1 matches
   matches=$(list_devices | awk -F'\t' -v w="$want" '
-    $1 == w { print; found = 1; exit }
-    { if (index(tolower($2), tolower(w)) || index(tolower($1), tolower(w))) m = m $0 "\n" }
-    END { if (!found) printf "%s", m }')
+    $1 == w { exact = $0 }
+    index(tolower($2), tolower(w)) || index(tolower($1), tolower(w)) { m = m $0 "\n" }
+    END { if (exact != "") print exact; else printf "%s", m }')
   [[ -n $matches ]] || die "no playback device matches '$want' (see: dac-rate devices)"
   if (( $(printf '%s\n' "$matches" | grep -c .) > 1 )); then
     printf '%s\n' "$matches" | cut -f1,2 >&2
     die "'$want' matches several devices; use the full node name"
   fi
-  printf '%s\n' "$matches" | head -1
+  printf '%s\n' "${matches%%$'\n'*}"
 }
 
 current_device() {
@@ -99,25 +118,64 @@ current_device() {
   fi
 }
 
-device_info() {  # node.name -> TSV line, empty if the device is not present now
-  list_devices | awk -F'\t' -v n="$1" '$1 == n { print; exit }'
+# node.name -> TSV line. If that node is gone (for example after a profile
+# change), fall back to another playback node of the same card.
+device_info() {
+  local line key
+  line=$(list_devices | awk -F'\t' -v n="$1" '$1 == n && !done { print; done = 1 }')
+  if [[ -z $line ]]; then
+    key=$(key_from_node "$1")
+    line=$(list_devices | awk -F'\t' -v k="$key" '$5 == k && !done { print; done = 1 }')
+  fi
+  printf '%s' "$line"
 }
 
-supported_rates() {  # node.name
-  local info card rates
+card_key() {  # node.name -> card key
+  local info key
   info=$(device_info "$1")
-  card=$(cut -f3 <<<"$info")
-  if [[ -n $card && -r /proc/asound/card$card/stream0 ]]; then
-    rates=$(grep -h 'Rates:' /proc/asound/card"$card"/stream* 2>/dev/null \
-      | sed 's/.*Rates://; s/,/ /g' | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -n -u)
-    # Some USB devices report a continuous range ("8000 - 192000"); fall back then.
-    if [[ -n $rates ]] && ! grep -q -- ' - ' /proc/asound/card"$card"/stream0; then
-      echo $rates
+  key=$(cut -f5 <<<"$info")
+  [[ -n $key ]] || key=$(key_from_node "$1")
+  echo "$key"
+}
+
+# Prints "source<TAB>rates".
+probe_rates() {
+  local info card dev out lo hi r rates=()
+  info=$(device_info "$1")
+  card=$(cut -f3 <<<"$info"); dev=$(cut -f4 <<<"$info")
+
+  # 1. USB devices list their rates in the stream descriptor.
+  if [[ -n $card && -r /proc/asound/card$card/stream0 ]] \
+     && ! grep -q -- ' - ' /proc/asound/card"$card"/stream0; then
+    out=$(grep -h 'Rates:' /proc/asound/card"$card"/stream* 2>/dev/null \
+      | sed 's/.*Rates://; s/,/ /g' | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -n -u | xargs)
+    if [[ -n $out ]]; then
+      printf 'USB descriptor\t%s\n' "$out"
       return
     fi
   fi
-  echo "${FALLBACK_RATES[@]}"
+
+  # 2. Ask the driver. Only works while PipeWire has the device closed (idle).
+  if [[ -n $card ]] && command -v aplay >/dev/null; then
+    out=$(timeout 3 aplay -q -t raw -D "hw:$card,$dev" --dump-hw-params /dev/null 2>&1 \
+      | awk '/^RATE:/ && !done { sub(/^RATE: */, ""); print; done = 1 }' || true)
+    if [[ $out =~ ^\[([0-9]+)\ ([0-9]+)\]$ ]]; then
+      lo=${BASH_REMATCH[1]}; hi=${BASH_REMATCH[2]}
+      for r in "${STD_RATES[@]}"; do (( r >= lo && r <= hi )) && rates+=("$r"); done
+    elif [[ $out =~ ^[0-9\ ]+$ ]]; then
+      read -r -a rates <<<"$out"
+    fi
+    if (( ${#rates[@]} )); then
+      printf 'driver (%s)\t%s\n' "$out" "${rates[*]}"
+      return
+    fi
+  fi
+
+  printf 'standard list (device busy or not probeable; stop playback and retry for exact rates)\t%s\n' \
+    "${FALLBACK_RATES[*]}"
 }
+
+supported_rates() { probe_rates "$1" | cut -f2; }
 
 hw_rate() {  # node.name -> running rate, empty when idle
   local info card dev f
@@ -125,50 +183,94 @@ hw_rate() {  # node.name -> running rate, empty when idle
   card=$(cut -f3 <<<"$info"); dev=$(cut -f4 <<<"$info")
   [[ -n $card ]] || return 0
   f=/proc/asound/card$card/pcm${dev}p/sub0/hw_params
-  [[ -r $f ]] && awk '/^rate:/ { print $2; exit }' "$f" || true
+  if [[ -r $f ]]; then awk '/^rate:/ { print $2; exit }' "$f"; fi
 }
 
 # --- the WirePlumber rule --------------------------------------------------
 
-rule_file() {  # node.name -> path
-  local slug
-  slug=$(sed 's/^alsa_output\.//; s/[^A-Za-z0-9._-]/_/g' <<<"$1")
-  echo "$WP_DIR/60-dac-rate-$slug.conf"
+slug() { echo "${1//[^A-Za-z0-9._-]/_}"; }
+
+rule_file() {  # node.name -> path (one rule per card)
+  echo "$WP_DIR/60-dac-rate-$(slug "$(card_key "$1")").conf"
 }
 
-rule_rates() {  # node.name -> rates in the rule, empty if there is no rule
+# dac-rate 1.0 named rules after the node; remove those when we write a new one.
+legacy_rule_file() {
+  echo "$WP_DIR/60-dac-rate-$(slug "${1#alsa_output.}").conf"
+}
+
+rule_meta() {  # node.name field -> value from the rule header, empty if none
   local f
   f=$(rule_file "$1")
+  [[ -f $f ]] || f=$(legacy_rule_file "$1")
   [[ -f $f ]] || return 0
-  sed -n 's/.*audio.allowed-rates = \[\(.*\)\].*/\1/p' "$f" | xargs
+  sed -n "s/^# dac-rate $2: //p" "$f" | sed -n 1p
 }
 
-rule_mode() {  # node.name -> "auto", a rate, or empty
-  local f
-  f=$(rule_file "$1")
-  [[ -f $f ]] || return 0
-  sed -n 's/^# dac-rate mode: //p' "$f"
+# The rule's mode for this output; empty if the card's rule is a node rule
+# for a different output.
+rule_mode() {
+  local mode other
+  mode=$(rule_meta "$1" mode)
+  if [[ -n $mode && $(rule_meta "$1" match) == node ]]; then
+    other=$(rule_meta "$1" node)
+    [[ -n $other && $other != "$1" ]] && return 0
+  fi
+  echo "$mode"
 }
 
-write_rule() {  # node.name mode rates...
-  local node=$1 mode=$2; shift 2
+json_str() { sed 's/\\/\\\\/g; s/"/\\"/g' <<<"$1"; }
+
+write_rule() {  # node.name mode match quality rates...
+  local node=$1 mode=$2 match=$3 quality=$4; shift 4
+  local info key longname matcher q_line="" f legacy
+  info=$(device_info "$node")
+  key=$(card_key "$node")
+  longname=$(cut -f6 <<<"$info")
+  case $match in
+    card) matcher="{ node.name = \"~alsa_output.$(json_str "$key").*\" }" ;;
+    port)
+      [[ -n $longname ]] || die "no card name/port info for this device; use --match card"
+      matcher="{ api.alsa.card.longname = \"$(json_str "$longname")\", api.alsa.pcm.stream = \"playback\" }" ;;
+    node) matcher="{ node.name = \"$(json_str "$node")\" }" ;;
+    *) die "unknown match mode '$match' (card, port or node)" ;;
+  esac
+  [[ -n $quality ]] && q_line="
+        resample.quality = $quality"
+
+  f=$(rule_file "$node")
+  legacy=$(legacy_rule_file "$node")
+  [[ $legacy != "$f" ]] && rm -f "$legacy"
   mkdir -p "$WP_DIR"
-  cat >"$(rule_file "$node")" <<EOF
+  cat >"$f" <<EOF
 # Written by dac-rate $VERSION. Remove this file (or run: dac-rate reset) to undo.
 # dac-rate mode: $mode
+# dac-rate match: $match
+# dac-rate node: $node
+# dac-rate quality: $quality
 monitor.alsa.rules = [
   {
     matches = [
-      { node.name = "$node" }
+      $matcher
     ]
     actions = {
       update-props = {
-        audio.allowed-rates = [ $* ]
+        audio.allowed-rates = [ $* ]$q_line
       }
     }
   }
 ]
 EOF
+}
+
+# Global allowed-rates set by the user's own PipeWire config (not ours).
+user_global_rates() {
+  local f
+  for f in "$CONF_HOME/pipewire/pipewire.conf" "$PW_DIR"/*.conf \
+           /etc/pipewire/pipewire.conf /etc/pipewire/pipewire.conf.d/*.conf; do
+    [[ -f $f && $f != "$PW_FILE" ]] || continue
+    sed -n 's/^[[:space:]]*default\.clock\.allowed-rates[[:space:]]*=[[:space:]]*\[\(.*\)\].*/\1/p' "$f"
+  done | tr -c '0-9' '\n' | grep -E '^[0-9]+$' || true
 }
 
 # Rewrite the global PipeWire file from all auto rules. Prints "changed" if it did.
@@ -177,16 +279,19 @@ sync_global() {
   rates=$(for f in "$WP_DIR"/60-dac-rate-*.conf; do
             [[ -f $f ]] && grep -q '^# dac-rate mode: auto' "$f" || continue
             sed -n 's/.*audio.allowed-rates = \[\(.*\)\].*/\1/p' "$f"
-          done | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -n -u | xargs)
+          done | tr ' ' '\n' | grep -E '^[0-9]+$' || true)
   before=$(cat "$PW_FILE" 2>/dev/null || true)
   if [[ -z $rates ]]; then
     rm -f "$PW_FILE"
   else
-    # Keep 44.1/48 kHz allowed so other outputs keep working normally.
-    rates=$(printf '%s\n' 44100 48000 $rates | sort -n -u | xargs)
-    mkdir -p "$(dirname "$PW_FILE")"
+    # Merge with the user's own list and keep 44.1/48 kHz, so other outputs
+    # keep working as before.
+    # shellcheck disable=SC2046,SC2086  # word splitting wanted: lists of numbers
+    rates=$(printf '%s\n' 44100 48000 $rates $(user_global_rates) | sort -n -u | xargs)
+    mkdir -p "$PW_DIR"
     cat >"$PW_FILE" <<EOF
-# Written by dac-rate $VERSION for devices in Auto mode. Run 'dac-rate reset' to undo.
+# Written by dac-rate $VERSION for devices in Auto mode (merged with your own
+# default.clock.allowed-rates, if any). Run 'dac-rate reset' to undo.
 context.properties = {
     default.clock.allowed-rates = [ $rates ]
 }
@@ -201,24 +306,55 @@ apply() {  # node.name: restart the audio services so they reread the config
   global=$(sync_global)
   [[ -n $global ]] && units=(pipewire.service pipewire-pulse.service wireplumber.service)
   if [[ ${OPT_NO_RESTART:-0} == 1 ]]; then
-    echo "Rule written. Apply with: systemctl --user restart ${units[*]}"
+    echo "Saved. Apply with: systemctl --user restart ${units[*]}"
     return
   fi
   if ! systemctl --user restart "${units[@]}" 2>/dev/null; then
-    echo "Could not restart the audio services; log out and back in to apply." >&2
+    warn "could not restart the audio services; log out and back in to apply"
     return
   fi
-  local i
-  for i in {1..50}; do
+  local _
+  for _ in {1..50}; do
     [[ -n $(device_info "$1") ]] && break
     sleep 0.1
   done
 }
 
 nudge() {  # open the device briefly so status can show the hardware rate
-  local rate=$1 node=$2
+  local rate=$1 node
+  node=$(device_info "$2" | cut -f1)
+  [[ -n $node ]] || return 0
   pw-cat --playback --raw --target="$node" --rate="$rate" --channels=2 --format=s32 \
     --sample-count=$((rate / 5)) /dev/zero >/dev/null 2>&1 || true
+}
+
+# --- conflicts -------------------------------------------------------------
+
+# Print one line per config that also sets rates for this card, plus a
+# runtime clock.force-rate (which forces every device).
+conflicts() {
+  local node=$1 key ours f base line setting where force
+  key=$(card_key "$node")
+  ours=$(basename "$(rule_file "$node")")
+  for f in "$CONF_HOME"/wireplumber/wireplumber.conf.d/*.conf \
+           /etc/wireplumber/wireplumber.conf.d/*.conf \
+           "$CONF_HOME/wireplumber/wireplumber.conf" /etc/wireplumber/wireplumber.conf; do
+    [[ -f $f ]] || continue
+    base=$(basename "$f")
+    [[ $base == 60-dac-rate-* ]] && continue
+    grep -qF -- "$key" "$f" || continue
+    line=$(grep -m1 -nE '^[^#]*(audio\.allowed-rates|audio\.rate|node\.force-rate)' "$f") || continue
+    if [[ ! -f $(rule_file "$node") ]]; then where="in effect: dac-rate has no rule for this device"
+    elif [[ $base > $ours ]]; then where="loads after dac-rate, so it wins"
+    else where="loads before dac-rate, which overrides it"; fi
+    setting=${line#*:}
+    setting=${setting#"${setting%%[![:space:]]*}"}
+    echo "$f:${line%%:*}: $setting ($where)"
+  done
+  force=$(pw-metadata -n settings 2>/dev/null | awk -F"'" '/key:.clock.force-rate./ && !done { print $4; done = 1 }')
+  if [[ -n $force && $force != 0 ]]; then
+    echo "runtime clock.force-rate = $force forces every device (set by another tool; clear with: pw-metadata -n settings 0 clock.force-rate 0)"
+  fi
 }
 
 # --- commands --------------------------------------------------------------
@@ -234,7 +370,7 @@ label() {
 cmd_devices() {
   local saved=""
   [[ -s $DEVICE_FILE ]] && saved=$(<"$DEVICE_FILE")
-  list_devices | while IFS=$'\t' read -r name desc _ _; do
+  list_devices | while IFS=$'\t' read -r name desc _; do
     if [[ $name == "$saved" ]]; then printf '* '; else printf '  '; fi
     printf '%-45s %s\n' "$desc" "$name"
   done
@@ -250,27 +386,45 @@ cmd_use() {
 }
 
 require_device() {
-  current_device || die "no device chosen yet; run: dac-rate use DEVICE (see: dac-rate devices)"
+  if [[ -n ${OPT_DEVICE:-} ]]; then
+    current_device || exit 1  # resolve_device already said why
+  else
+    current_device || die "no device chosen yet; run: dac-rate use DEVICE (see: dac-rate devices)"
+  fi
 }
 
 cmd_rates() {
-  local node
+  local node out
   node=$(require_device)
-  supported_rates "$node"
+  out=$(probe_rates "$node")
+  echo "${out#*$'\t'}"
+  echo "(source: ${out%%$'\t'*})" >&2
 }
 
 cmd_set() {
-  local arg=${1:-} node rates r ok=0
+  local arg=${1:-} node rates r ok=0 match quality
   [[ -n $arg ]] || die "usage: dac-rate set RATE|auto"
   node=$(require_device)
   [[ -n $(device_info "$node") ]] || die "$node is not connected right now"
+  match=${OPT_MATCH:-$(rule_meta "$node" match)}; match=${match:-card}
+  local other
+  other=$(rule_meta "$node" node)
+  if [[ $match == node && $(rule_meta "$node" match) == node && -n $other && $other != "$node" ]]; then
+    die "this card already has a rule for $other (one rule per card). Run 'dac-rate -d $other reset' first, or use -m card for all its outputs"
+  fi
+  quality=${OPT_QUALITY-$(rule_meta "$node" quality)}
+  [[ $quality == default ]] && quality=""
+  if [[ -n $quality ]] && ! [[ $quality =~ ^[0-9]+$ && $quality -le 14 ]]; then
+    die "quality must be 0-14"
+  fi
   rates=$(supported_rates "$node")
   if [[ $arg == auto ]]; then
-    write_rule "$node" auto $rates
+    # shellcheck disable=SC2086  # one argument per rate
+    write_rule "$node" auto "$match" "$quality" $rates
   else
     for r in $rates; do [[ $r == "$arg" ]] && ok=1; done
     (( ok )) || die "$arg Hz is not supported by this device (supported: $rates)"
-    write_rule "$node" "$arg" "$arg"
+    write_rule "$node" "$arg" "$match" "$quality" "$arg"
   fi
   apply "$node"
   [[ $arg == auto ]] || nudge "$arg" "$node"
@@ -279,30 +433,45 @@ cmd_set() {
 }
 
 cmd_reset() {
-  local node f
+  local node f removed=0 other
   node=$(require_device)
-  f=$(rule_file "$node")
-  if [[ -f $f ]]; then
-    rm -f "$f"
-    apply "$node"
+  other=$(rule_meta "$node" node)
+  if [[ $(rule_meta "$node" match) == node && -n $other && $other != "$node" ]]; then
+    die "this output has no rule; its card's rule is for $other (reset that one with: dac-rate -d $other reset)"
   fi
+  for f in "$(rule_file "$node")" "$(legacy_rule_file "$node")"; do
+    [[ -f $f ]] && { rm -f "$f"; removed=1; }
+  done
+  (( removed )) && apply "$node"
   notify "$(label "")"
   cmd_status
 }
 
 cmd_status() {
-  local node info hw
+  local node info hw extra="" c line
   node=$(require_device)
   info=$(device_info "$node")
   printf 'Device: %s\n' "$( [[ -n $info ]] && cut -f2 <<<"$info" || echo "$node (not connected)")"
-  printf 'Rule:   %s\n' "$(label "$(rule_mode "$node")")"
+  if [[ -n $(rule_mode "$node") ]]; then
+    c=$(rule_meta "$node" match)
+    extra=" (match: ${c:-node}"
+    c=$(rule_meta "$node" quality)
+    [[ -n $c ]] && extra+=", quality: $c"
+    extra+=")"
+  fi
+  printf 'Rule:   %s%s\n' "$(label "$(rule_mode "$node")")" "$extra"
   hw=$(hw_rate "$node")
   printf 'Now:    %s\n' "$( [[ -n $hw ]] && echo "$hw Hz" || echo "idle (opens when something plays)")"
+  c=$(conflicts "$node")
+  if [[ -n $c ]]; then
+    echo "Other settings that affect this device:"
+    while IFS= read -r line; do echo "  - $line"; done <<<"$c"
+  fi
 }
 
 pick_device_gui() {
   local args=() name desc
-  while IFS=$'\t' read -r name desc _ _; do
+  while IFS=$'\t' read -r name desc _; do
     args+=("$name" "$desc")
   done < <(list_devices)
   (( ${#args[@]} )) || die "no ALSA playback devices found"
@@ -314,11 +483,11 @@ pick_device_gui() {
 }
 
 pick_rate_gui() {
-  local node=$1 mode r args=() status
+  local node=$1 mode r args=() status on text
   mode=$(rule_mode "$node")
   status=$(cmd_status)
   for r in auto $(supported_rates "$node") reset; do
-    local on=off text
+    on=off
     [[ $r == "$mode" || ( $r == reset && -z $mode ) ]] && on=on
     if [[ $r == reset ]]; then text=$(label ""); else text=$(label "$r"); fi
     case $GUI in
@@ -345,45 +514,66 @@ pick_terminal() {
   echo
   for r in auto $(supported_rates "$node") reset; do
     choices+=("$r")
-    if [[ $r == reset ]]; then printf '%2d) %s\n' $i "$(label "")"; else printf '%2d) %s\n' $i "$(label "$r")"; fi
+    if [[ $r == reset ]]; then printf '%2d) %s\n' "$i" "$(label "")"; else printf '%2d) %s\n' "$i" "$(label "$r")"; fi
     ((i++))
   done
   read -r -p "Choose: " i
-  [[ $i =~ ^[0-9]+$ ]] && (( i >= 1 && i <= ${#choices[@]} )) || die "invalid choice"
+  if ! [[ $i =~ ^[0-9]+$ ]] || (( i < 1 || i > ${#choices[@]} )); then
+    die "invalid choice"
+  fi
   r=${choices[i-1]}
   if [[ $r == reset ]]; then cmd_reset; else cmd_set "$r"; fi
 }
 
 cmd_pick() {
   GUI=""
-  if [[ -n ${WAYLAND_DISPLAY:-}${DISPLAY:-} && ! -t 0 ]] || [[ ${DAC_RATE_GUI:-} == 1 ]]; then
-    if command -v kdialog >/dev/null; then GUI=kdialog
-    elif command -v zenity >/dev/null; then GUI=zenity; fi
-  fi
+  local want=${DAC_RATE_GUI:-}
+  case $want in
+    kdialog|zenity) command -v "$want" >/dev/null && GUI=$want ;;
+    1|"")
+      if [[ $want == 1 || ( -n ${WAYLAND_DISPLAY:-}${DISPLAY:-} && ! -t 0 ) ]]; then
+        if command -v kdialog >/dev/null; then GUI=kdialog
+        elif command -v zenity >/dev/null; then GUI=zenity; fi
+      fi ;;
+  esac
   if [[ -z $GUI ]]; then
     pick_terminal
     return
   fi
-  local node choice
+  local node choice err
   if ! node=$(current_device) || [[ -z $(device_info "$node") ]]; then
     node=$(pick_device_gui) || exit 0
     cmd_use "$node" >/dev/null
   fi
   choice=$(pick_rate_gui "$node") || exit 0
-  if [[ $choice == reset ]]; then cmd_reset >/dev/null; else cmd_set "$choice" >/dev/null; fi
+  NOTIFY=1
+  # No terminal to show errors in, so show them in a dialog.
+  if ! err=$( { if [[ $choice == reset ]]; then cmd_reset; else cmd_set "$choice"; fi; } 2>&1 >/dev/null ); then
+    case $GUI in
+      kdialog) kdialog --title "DAC rate" --error "$err" ;;
+      zenity)  zenity --error --title "DAC rate" --text "$err" ;;
+    esac
+    exit 1
+  fi
 }
 
 main() {
-  OPT_DEVICE="" OPT_NO_RESTART=0
+  OPT_DEVICE="" OPT_NO_RESTART=0 OPT_MATCH=""
+  unset OPT_QUALITY
   local args=()
   while (( $# )); do
     case $1 in
-      -d|--device) OPT_DEVICE=${2:-}; shift 2 ;;
+      -d|--device|-m|--match|-q|--quality)
+        [[ $# -ge 2 && -n $2 ]] || die "$1 needs a value" ;;&
+      -d|--device) OPT_DEVICE=$2; shift 2 ;;
+      -m|--match) OPT_MATCH=$2; shift 2 ;;
+      -q|--quality) OPT_QUALITY=$2; shift 2 ;;
       -n|--no-restart) OPT_NO_RESTART=1; shift ;;
       *) args+=("$1"); shift ;;
     esac
   done
   set -- "${args[@]+"${args[@]}"}"
+  case $OPT_MATCH in ""|card|port|node) ;; *) die "--match must be card, port or node" ;; esac
 
   case ${1:-} in
     help|-h|--help) usage; return ;;
