@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=DAC Sample Rate
+Comment=Lock your DAC's sample rate or let it follow the content
+Exec=dac-rate
+Icon=audio-card
+Terminal=false
+Type=Application
+Categories=Audio;AudioVideo;Settings;
+Keywords=dac;sample;rate;pipewire;wireplumber;alsa;usb;hi-res;
+StartupNotify=false
