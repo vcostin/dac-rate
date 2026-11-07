@@ -394,7 +394,8 @@ fi
 # What to restart afterwards: the login item's systemd unit, or a copy started some other way.
 restart=""
 mapfile -t old_ids < <(gui_ids)
-old_pids=("${old_ids[@]%%:*}")
+old_pids=()  # (a loop, not "${old_ids[@]%%:*}": bash < 4.4 calls an empty array unset under set -u)
+for id in "${old_ids[@]+"${old_ids[@]}"}"; do old_pids+=("${id%%:*}"); done
 if unit_active; then
   restart=unit
 elif (( ${#old_ids[@]} )); then
