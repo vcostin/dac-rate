@@ -8,13 +8,19 @@ The restart tests run the real app (offscreen) against tests/fake-dac-rate.
 """
 import os
 import re
+import resource
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+
+# Safety net: a test child that crashes must not leave a core dump (on KDE that starts
+# the DrKonqi crash reporter on the user's desktop). Children inherit this limit.
+resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -79,7 +85,10 @@ class InstallTest(unittest.TestCase):
         (self.tmp / "xdg").mkdir()
         self.env = {
             "HOME": str(self.home), "PATH": f"{stubs}:{os.environ['PATH']}", "LANG": "C.UTF-8",
-            "TMPDIR": str(self.tmp / "run"), "XDG_RUNTIME_DIR": str(self.tmp / "xdg"), "QT_QPA_PLATFORM": "offscreen",
+            "TMPDIR": str(self.tmp / "run"), "XDG_RUNTIME_DIR": str(self.tmp / "xdg"),
+            # Every app these tests start draws offscreen. The installer only relaunches the app
+            # in a graphical session, so name a (never contacted) Wayland display.
+            "QT_QPA_PLATFORM": "offscreen", "WAYLAND_DISPLAY": "dac-rate-test-none",
             "SYSTEMCTL_LOG": str(self.tmp / "systemctl.log"), "FAKE_UNIT_ACTIVE": str(self.tmp / "unit-active"),
             "DAC_RATE_CLI": str(HERE / "fake-dac-rate"),
             "FAKE_STATE": str(self.tmp / "state.json"), "FAKE_LOG": str(self.tmp / "calls.log"),
@@ -290,11 +299,25 @@ class InstallTest(unittest.TestCase):
     def test_failed_relaunch_is_reported(self):
         self.install()
         old = self.start_app("--tray")
-        out = self.install(QT_QPA_PLATFORM="no-such-platform")
+        # The relaunch fails cleanly (exit 1), not by crashing: python3 on PATH refuses to start the app.
+        fake = self.tmp / "stubs" / "python3"
+        fake.write_text(f'#!/bin/sh\nif [ -n "$FAKE_GUI_START_FAIL" ] && [ "$2" = "--tray" ]; then\n'
+                        f'  echo "fake: the app cannot start" >&2; exit 1\nfi\nexec {sys.executable} "$@"\n')
+        fake.chmod(0o755)
+        out = self.install(FAKE_GUI_START_FAIL="1")
         self.assertEqual(old.wait(5), 0)
         self.assertIn("The app did not start again", out)
-        self.assertIn("no-such-platform", out, "shows the app's own error")
+        self.assertIn("fake: the app cannot start", out, "shows the app's own error")
         self.assertNotIn("Restarted", out)
+
+    def test_no_relaunch_without_graphical_session(self):
+        self.install()
+        old = self.start_app("--tray")
+        out = self.install(WAYLAND_DISPLAY="", DISPLAY="")
+        self.assertEqual(old.wait(5), 0, "still stopped cleanly")
+        self.assertIn("Not restarting the app", out)
+        self.assertIn("no graphical session", out)
+        self.assertEqual(gui_pids(self.gui), [], "nothing started")
 
     def test_concurrent_install_refused(self):
         import fcntl
