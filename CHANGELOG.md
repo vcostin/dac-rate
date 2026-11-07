@@ -6,6 +6,7 @@
 - It replaces files in one step (temp file + rename), then checks the installed versions.
 - If the app is running, it is restarted on the new version in the same mode. The installer stops it cleanly itself, without relying on the login unit's 5-second stop timeout, then starts the login unit again (or relaunches the app if it wasn't started at login). It checks that the new copy stays up; if not, it shows the app's output, which is kept in `~/.local/state/dac-rate/gui.log`. The login item is pointed at the installed app if it points somewhere else (and systemd reloads it).
 - Only one `./install.sh` runs at a time.
+- Without a graphical session (ssh, a TTY), the installer still stops a running app cleanly but doesn't relaunch it, and says it will start at next login. The app itself exits with a message instead of crashing (a Qt abort, core dump and crash reporter) when there is no display.
 - `./install.sh --dry-run` shows what would happen without changing anything.
 - The app quits cleanly on SIGTERM (systemd stop or restart, logout, the installer), so a rate change in progress finishes. `--uninstall` uses this too, instead of killing the app.
 - The app shows its version: next to the login option (it opens an About box) and as an About item in the tray menu. Qt gets it too (`setApplicationVersion`).

@@ -256,8 +256,8 @@ launch_detached() {
   return 1
 }
 
-has_display() {
-  [[ -n ${WAYLAND_DISPLAY:-}${DISPLAY:-}${QT_QPA_PLATFORM:-} ]]
+has_display() {  # a graphical session the relaunched app can open its window or tray in
+  [[ -n ${WAYLAND_DISPLAY:-}${DISPLAY:-} ]]
 }
 
 # --- files -------------------------------------------------------------------------
@@ -455,7 +455,11 @@ case $restart in
         echo "Stopped the old app ($was), but the new one did not start; open it from the app menu." >&2
       fi
     else
-      echo "Stopped the running app ($was); no desktop session here, so start it again yourself."
+      if [[ -f $LOGIN_ITEM ]]; then
+        echo "Not restarting the app ($was): no graphical session; it will start at next login."
+      else
+        echo "Not restarting the app ($was): no graphical session; open it from the app menu."
+      fi
     fi ;;
 esac
 if has_pyside6; then

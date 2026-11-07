@@ -4,6 +4,9 @@
 
 Set DAC_RATE_SHOTS=<dir> to also save screenshots of each state.
 """
+import resource
+import subprocess
+import sys
 import importlib.machinery
 import importlib.util
 import json
@@ -12,6 +15,9 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+
+# Safety net: no core dumps from a crashing test (on KDE they start the DrKonqi crash reporter).
+resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
 HERE = Path(__file__).resolve().parent
 TMP = tempfile.mkdtemp(prefix="dac-rate-gui-test-")
@@ -76,6 +82,10 @@ class GuiBase(unittest.TestCase):
     def tearDown(self):
         # Let queued dac-rate calls finish so they can't leak into the next test.
         wait_until(lambda: not self.w.cli.busy() and not self.w.cli.queue)
+        # As the app does when it quits: no more polling, nothing left running at exit.
+        self.w.hw_timer.stop()
+        self.w.dev_timer.stop()
+        self.w.cli.shutdown()
         self.w.quitting = True
         self.w.close()
         self.w.deleteLater()
@@ -240,6 +250,13 @@ class GuiTest(GuiBase):
         finally:
             gui.BUILD = old
         self.assertEqual(gui.version_text(), gui.VERSION)
+
+    def test_no_display_exits_without_crashing(self):
+        env = {k: val for k, val in os.environ.items() if k not in ("WAYLAND_DISPLAY", "DISPLAY", "QT_QPA_PLATFORM")}
+        r = subprocess.run([sys.executable, str(HERE.parent / "dac-rate-gui"), "--tray"], env=env,
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 1, "a clean exit, not an abort (-6)")
+        self.assertIn("no graphical session", r.stderr)
 
     def test_autostart_toggle(self):
         self.w.cb_autostart.setChecked(True)
