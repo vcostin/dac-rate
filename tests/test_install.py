@@ -326,6 +326,25 @@ class InstallTest(unittest.TestCase):
             self.assertIn("Another ./install.sh is running", self.install(ok=False))
         self.install()
 
+    def test_reused_pid_is_never_signalled(self):
+        """stop_ids only signals the process it found: same PID, same start time."""
+        victim = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(victim.kill)
+        script = self.tmp / "ids.sh"
+        text = (self.src / "install.sh").read_text()
+        funcs = text[text.index("proc_id() {"):text.index("has_display() {")]
+        script.write_text("set -euo pipefail\nSTOP_WAIT=1\n" + funcs + f"""
+real=$(proc_id {victim.pid})
+[ "$real" = "{victim.pid}:${{real#*:}}" ] || {{ echo "bad id: $real"; exit 1; }}
+stale="{victim.pid}:1"   # same PID, another start time: a reused PID
+[ -z "$(still_running "$stale")" ] || {{ echo "stale id counted as running"; exit 1; }}
+stop_ids "$stale"
+echo ok
+""")
+        r = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.stdout.strip(), "ok", r.stdout + r.stderr)
+        self.assertIsNone(victim.poll(), "the unrelated process was not signalled")
+
     def test_no_restart_when_not_running(self):
         out = self.install()
         self.assertNotIn("Restarted", out)

@@ -203,7 +203,7 @@ unit_active() {
 
 # "PID:start time" for a running process (not a zombie, i.e. an exited process its
 # parent has not collected yet); nothing if it is gone. The start time tells a
-# reused PID apart.
+# reused PID apart, so the installer only ever signals the process it found.
 proc_id() {
   local stat fields
   stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 0
@@ -211,44 +211,60 @@ proc_id() {
   [[ ${fields[0]} == Z ]] || echo "$1:${fields[19]}"
 }
 
-# Send SIGTERM (the app quits cleanly, letting a change finish) and wait.
-stop_pids() {
-  local pid i ids=() left
-  for pid in "$@"; do
-    ids+=("$(proc_id "$pid")")
+# "PID:start time" of each running copy of the installed app.
+gui_ids() {
+  local pid id
+  while read -r pid; do
+    id=$(proc_id "$pid")
+    [[ -n $id ]] && echo "$id"
+  done < <(gui_pids)
+  return 0
+}
+
+# The IDs (from "$@") whose process is still the same one; one per line.
+still_running() {
+  local id
+  for id in "$@"; do
+    [[ $(proc_id "${id%%:*}") == "$id" ]] && echo "$id"
   done
-  (( ${#ids[@]} )) || return 0
-  kill -TERM "$@" 2>/dev/null || true
+  return 0
+}
+
+# Send SIGTERM (the app quits cleanly, letting a change finish) and wait;
+# SIGKILL whatever is left after STOP_WAIT. Arguments are IDs from gui_ids.
+stop_ids() {
+  local id i left=()
+  mapfile -t left < <(still_running "$@")
+  (( ${#left[@]} )) || return 0
+  for id in "${left[@]}"; do kill -TERM "${id%%:*}" 2>/dev/null || true; done
   for ((i = 0; i < STOP_WAIT * 10; i++)); do
-    left=()
-    for pid in "${ids[@]}"; do
-      [[ -n $pid && $(proc_id "${pid%%:*}") == "$pid" ]] && left+=("${pid%%:*}")
-    done
+    mapfile -t left < <(still_running "${left[@]}")
     (( ${#left[@]} )) || return 0
     sleep 0.1
   done
   echo "The app did not quit within $STOP_WAIT s; stopping it." >&2
-  kill -KILL "${left[@]}" 2>/dev/null || true
+  mapfile -t left < <(still_running "${left[@]}")
+  for id in "${left[@]+"${left[@]}"}"; do kill -KILL "${id%%:*}" 2>/dev/null || true; done
 }
 
 # Start the app detached and check that it stays up; show its errors if not.
+# A copy counts as the new one only if its ID was not among the old ones (old_ids).
 # Its output (Qt's too, which would otherwise go to the journal) goes to a log file.
 launch_detached() {
-  local log i pid new
+  local log i id new=""
   log="${XDG_STATE_HOME:-$HOME/.local/state}/dac-rate/gui.log"
   mkdir -p "$(dirname "$log")"
   # 9>&-: the app must not inherit the installer's lock (it would hold it while it runs).
   QT_FORCE_STDERR_LOGGING=1 setsid -f "$GUI" "$@" </dev/null >"$log" 2>&1 9>&-
   for ((i = 0; i < 30; i++)); do
     sleep 0.1
-    new=""
-    for pid in $(gui_pids); do
-      [[ " ${pids[*]-} " == *" $pid "* ]] || new=$pid
-    done
+    while read -r id; do
+      [[ " ${old_ids[*]-} " == *" $id "* ]] || new=$id
+    done < <(gui_ids)
     [[ -n $new ]] && break
   done
   sleep 1  # past a crash at startup
-  if [[ -n $new && -n $(proc_id "$new") ]]; then
+  if [[ -n $new && -n $(still_running "$new") ]]; then
     return 0
   fi
   echo "The app did not start again. Its output ($log):" >&2
@@ -257,7 +273,7 @@ launch_detached() {
 }
 
 has_display() {  # a graphical session the relaunched app can open its window or tray in
-  [[ -n ${WAYLAND_DISPLAY:-}${DISPLAY:-} ]]
+  [[ -n ${WAYLAND_DISPLAY:-}${WAYLAND_SOCKET:-}${DISPLAY:-} ]]
 }
 
 # --- files -------------------------------------------------------------------------
@@ -320,8 +336,8 @@ fi
 
 if (( UNINSTALL )); then
   # Stop it ourselves first: the unit's 5 s stop timeout could cut off a rate change.
-  mapfile -t pids < <(gui_pids)
-  stop_pids "${pids[@]+"${pids[@]}"}"
+  mapfile -t old_ids < <(gui_ids)
+  stop_ids "${old_ids[@]+"${old_ids[@]}"}"
   if unit_active; then
     systemctl --user stop "$UNIT" || true
   fi
@@ -377,12 +393,13 @@ fi
 
 # What to restart afterwards: the login item's systemd unit, or a copy started some other way.
 restart=""
-mapfile -t pids < <(gui_pids)
+mapfile -t old_ids < <(gui_ids)
+old_pids=("${old_ids[@]%%:*}")
 if unit_active; then
   restart=unit
-elif (( ${#pids[@]} )); then
+elif (( ${#old_ids[@]} )); then
   restart=tray
-  pid_has_tray_arg "${pids[0]}" || restart=window
+  pid_has_tray_arg "${old_pids[0]}" || restart=window
 fi
 
 # The launcher opens the app when PySide6 is there, else the simple picker.
@@ -397,8 +414,8 @@ fi
 if (( DRY_RUN )); then
   echo "Would install $BIN, $GUI and the menu launcher${BUILD:+, marked as build $BUILD}"
   case $restart in
-    unit) echo "Would restart the running app (PID ${pids[*]-?}, through systemd unit $UNIT)" ;;
-    tray|window) echo "Would restart the running app (PID ${pids[*]}, $restart mode)" ;;
+    unit) echo "Would restart the running app (PID ${old_pids[*]-?}, through systemd unit $UNIT)" ;;
+    tray|window) echo "Would restart the running app (PID ${old_pids[*]}, $restart mode)" ;;
   esac
   (( fix_login_item )) && echo "Would point the login item at $GUI"
   exit 0
@@ -435,7 +452,7 @@ was=$NEW
 [[ -n $OLD && $OLD != "$NEW" ]] && was="$OLD → $NEW"
 case $restart in
   unit)
-    stop_pids "${pids[@]+"${pids[@]}"}"
+    stop_ids "${old_ids[@]+"${old_ids[@]}"}"
     # Still active: it runs something other than $GUI (an old path in the login item).
     if unit_active; then systemctl --user stop "$UNIT" || true; fi
     # The unit's ExecStart comes from the login item when systemd reads it.
@@ -446,7 +463,7 @@ case $restart in
       echo "Could not start $UNIT again (see: journalctl --user -u '$UNIT'); log out and back in to run the new version." >&2
     fi ;;
   tray|window)
-    stop_pids "${pids[@]}"
+    stop_ids "${old_ids[@]}"
     if has_display; then
       args=(); [[ $restart == tray ]] && args=(--tray)
       if launch_detached "${args[@]+"${args[@]}"}"; then
