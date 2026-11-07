@@ -220,6 +220,27 @@ class GuiTest(GuiBase):
         wait_until(lambda: False, 0.3)  # no callbacks into deleted objects
         self.w.applying = False
 
+    def test_version_is_shown(self):
+        self.assertIn(f"dac-rate {gui.VERSION}", self.w.version_label.text())
+        tray = gui.Tray(self.w)
+        self.w.set_tray(tray)
+        tray._rebuild_menu()
+        self.assertIn(f"About (dac-rate {gui.VERSION})", [a.text() for a in tray.menu.actions()])
+        about = []
+        gui.QMessageBox.about = lambda _parent, title, text: about.append(text)
+        self.w.version_label.linkActivated.emit("about")
+        self.assertIn(f"dac-rate {gui.VERSION}", about[0])
+        self.assertIn(gui.HOMEPAGE, about[0])
+        tray.setVisible(False)
+
+    def test_build_is_shown(self):
+        old, gui.BUILD = gui.BUILD, "1.2.1-3-g914acfa-dirty"
+        try:
+            self.assertEqual(gui.version_text(), f"{gui.VERSION} (1.2.1-3-g914acfa-dirty)")
+        finally:
+            gui.BUILD = old
+        self.assertEqual(gui.version_text(), gui.VERSION)
+
     def test_autostart_toggle(self):
         self.w.cb_autostart.setChecked(True)
         text = gui.AUTOSTART.read_text()

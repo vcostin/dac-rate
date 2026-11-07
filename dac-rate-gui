@@ -8,10 +8,12 @@ always agree. The live hardware rate is read straight from /proc/asound.
 import json
 import os
 import shutil
+import signal
+import socket
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QProcess, QSettings, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QProcess, QSettings, QSocketNotifier, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
@@ -21,7 +23,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-VERSION = "1.2.1"
+VERSION = "1.3.0"
+BUILD = ""  # set by install.sh when not installed from a release tag (git describe)
+HOMEPAGE = "https://github.com/vcostin/dac-rate"
 APP_NAME = "DAC Sample Rate"
 MATCH_MODES = [
     ("card", "Whole card, any profile (recommended)"),
@@ -32,6 +36,11 @@ MATCH_MODES = [
 TRAY_WAIT_MS = 60_000
 TRAY_POLL_MS = 1_000
 AUTOSTART = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "autostart" / "dac-rate-gui.desktop"
+
+
+def version_text():
+    """1.2.1, or 1.2.1 (1.2.1-3-g914acfa-dirty) for a build that is not a release tag."""
+    return f"{VERSION} ({BUILD})" if BUILD else VERSION
 
 
 def find_cli():
@@ -282,7 +291,13 @@ class MainWindow(QMainWindow):
         self.cb_autostart.setChecked(AUTOSTART.exists())
         self.cb_autostart.toggled.connect(self._on_autostart)
         lay.addWidget(self.cb_tray)
-        lay.addWidget(self.cb_autostart)
+        login_row = QHBoxLayout()
+        login_row.addWidget(self.cb_autostart, 1)
+        self.version_label = QLabel(f'<a href="about">dac-rate {_html(version_text())}</a>')
+        self.version_label.setToolTip("About this app")
+        self.version_label.linkActivated.connect(lambda _: self.show_about())
+        login_row.addWidget(self.version_label)
+        lay.addLayout(login_row)
 
         # Bottom bar
         bottom = QHBoxLayout()
@@ -598,6 +613,13 @@ class MainWindow(QMainWindow):
             self.cb_autostart.setChecked(AUTOSTART.exists())
             self.cb_autostart.blockSignals(False)
 
+    def show_about(self):
+        QMessageBox.about(
+            self, f"About {APP_NAME}",
+            f"<b>{APP_NAME}</b><br>dac-rate {_html(version_text())}<br><br>"
+            f"Command: {_html(self.cli.path)}<br>"
+            f'<a href="{HOMEPAGE}">{HOMEPAGE}</a>')
+
     def show_and_raise(self):
         self.show()
         self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
@@ -689,6 +711,7 @@ class Tray(QSystemTrayIcon):
         add("PipeWire default", "reset")
         m.addSeparator()
         m.addAction(QIcon.fromTheme("configure"), "Open window…", w.show_and_raise)
+        m.addAction(QIcon.fromTheme("help-about"), f"About (dac-rate {version_text()})", w.show_about)
         m.addAction(QIcon.fromTheme("application-exit"), "Quit", _quit)
 
 
@@ -810,6 +833,32 @@ def _quit():
     app.quit()
 
 
+def _quit_on_signals():
+    """SIGTERM and SIGINT quit like the Quit menu item, so a change in progress
+    can finish: systemctl restart or stop, logging out, and install.sh upgrades.
+
+    Qt's event loop does not run Python signal handlers, so the signal is
+    passed in through a socket that Qt watches. Keep the return value alive.
+    """
+    rsock, wsock = socket.socketpair()
+    for s in (rsock, wsock):
+        s.setblocking(False)
+    signal.set_wakeup_fd(wsock.fileno())
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda *_: None)  # handled below, once Qt wakes up
+    notifier = QSocketNotifier(rsock.fileno(), QSocketNotifier.Type.Read)
+
+    def on_signal():
+        try:
+            rsock.recv(64)
+        except OSError:
+            pass
+        _quit()
+
+    notifier.activated.connect(on_signal)
+    return rsock, wsock, notifier
+
+
 def _on_about_to_quit():
     for w in QApplication.instance().topLevelWidgets():
         if isinstance(w, MainWindow):
@@ -820,14 +869,16 @@ def _on_about_to_quit():
 
 def main():
     if "--version" in sys.argv:
-        print(f"dac-rate-gui {VERSION}")
+        print(f"dac-rate-gui {version_text()}")
         return 0
     app = QApplication(sys.argv)
     app.setApplicationName("dac-rate")
+    app.setApplicationVersion(VERSION)
     app.setApplicationDisplayName(APP_NAME)
     app.setDesktopFileName("dac-rate")
     app.setQuitOnLastWindowClosed(False)
     app.aboutToQuit.connect(_on_about_to_quit)
+    keep_signals = _quit_on_signals()  # noqa: F841 (must stay alive)
     start_in_tray = "--tray" in sys.argv
 
     # One instance: a second launch just shows the running one.

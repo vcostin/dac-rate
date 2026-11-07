@@ -7,7 +7,8 @@
 # global allowed list (user config).
 set -euo pipefail
 
-VERSION=1.2.1
+VERSION=1.3.0
+BUILD=""  # set by install.sh when not installed from a release tag (git describe)
 CONF_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 STATE_DIR="$CONF_HOME/dac-rate"
 DEVICE_FILE="$STATE_DIR/device"
@@ -619,7 +620,7 @@ main() {
 
   case ${1:-} in
     help|-h|--help) usage; return ;;
-    version|--version) echo "dac-rate $VERSION"; return ;;
+    version|--version) echo "dac-rate $VERSION${BUILD:+ ($BUILD)}"; return ;;
   esac
   need pw-dump pw-cat jq
   check_wireplumber

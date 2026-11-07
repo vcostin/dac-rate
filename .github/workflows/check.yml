@@ -28,8 +28,12 @@ jobs:
       - name: PySide6
         run: pip install --quiet PySide6
       - name: Compile
-        run: python -m py_compile dac-rate-gui tests/fake-dac-rate tests/test_gui.py
+        run: python -m py_compile dac-rate-gui tests/fake-dac-rate tests/test_gui.py tests/test_install.py
       - name: App tests (offscreen)
         env:
           QT_QPA_PLATFORM: offscreen
         run: python -m unittest -v tests/test_gui.py
+      - name: Installer tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m unittest -v tests/test_install.py
