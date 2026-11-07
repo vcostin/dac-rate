@@ -115,10 +115,10 @@ git checkout "$(git tag --sort=-v:refname | head -n1)"   # the latest release
 
 It says what it's doing: `Installing 1.3.0`, `Upgrading 1.2.1 → 1.3.0` or `Reinstalling 1.3.0`, and shows the source (`git describe`). If the checkout isn't exactly at a release tag, or has uncommitted changes, it warns and marks the build, for example `1.3.0 (1.3.0-2-gabc1234-dirty)`. The app's About box, `dac-rate version` and `dac-rate-gui --version` show the same. A downgrade asks first (or needs `--force` when there's no terminal to ask in). A checkout whose tag doesn't match its `VERSION` stops the install, unless you add `--force`.
 
-Your rules and settings are kept. Files are replaced in one step, never half-written. If the app is running, it quits cleanly first (so a rate change in progress finishes) and is restarted on the new version in the same mode:
+Your rules and settings are kept. Files are replaced in one step, never half-written. If the app is running, it quits cleanly first (so a rate change in progress finishes) and is restarted on the new version, in the tray or with its window open, as it was:
 
 - **Started at login:** its login item is started again. If that fails, the installer says so and points you to the journal (`journalctl --user -u 'app-dac\x2drate\x2dgui@autostart.service'`).
-- **Started any other way:** it is started again directly. If it doesn't come up, the installer shows its output, which is also kept in `~/.local/state/dac-rate/gui.log`. Without a graphical session (over ssh, say) it is only stopped, and the installer says so: it starts again at your next login if the login item is on, otherwise open it from the app menu.
+- **Started any other way:** it is started again directly, with `--tray` if it was started that way. If it doesn't come up, the installer shows its output, which is also kept in `~/.local/state/dac-rate/gui.log`. Without a graphical session (over ssh, say) it is only stopped, and the installer says so: it starts again at your next login if the login item is on, otherwise open it from the app menu.
 
 If the restart fails, the installer exits with status 1 (the new files are installed either way). If the login item points somewhere else, for example at an old checkout, it is pointed at the installed app.
 
