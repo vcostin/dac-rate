@@ -218,11 +218,11 @@ def maintenance(argv):
 
 MAINTENANCE = ("--restart-running", "--stop-running")
 if __name__ == "__main__":
+    if any(a in MAINTENANCE for a in sys.argv[1:]):  # first: these never ignore their other options
+        sys.exit(maintenance(sys.argv[1:]))
     if "--version" in sys.argv[1:]:
         print(f"dac-rate-gui {version_text()}")
         sys.exit(0)
-    if any(a in MAINTENANCE for a in sys.argv[1:]):
-        sys.exit(maintenance(sys.argv[1:]))
 
 from PySide6.QtCore import QObject, QProcess, QSettings, QSocketNotifier, Qt, QTimer, Signal  # noqa: E402
 from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QPainter, QPixmap  # noqa: E402

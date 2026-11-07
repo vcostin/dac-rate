@@ -113,7 +113,7 @@ cd dac-rate && git fetch --tags && git checkout v1.3.0   # the new release tag
 
 It says what it's doing: `Installing 1.3.0`, `Upgrading 1.2.1 → 1.3.0` or `Reinstalling 1.3.0`, and shows the source (`git describe`). If the checkout isn't exactly at a release tag, or has uncommitted changes, it warns and marks the build, for example `1.3.0 (1.3.0-2-gabc1234-dirty)`. The app's About box, `dac-rate version` and `dac-rate-gui --version` show the same. A downgrade asks first, or needs `--force`. So does a checkout whose tag doesn't match its `VERSION`.
 
-Your rules and settings are kept. Files are replaced in one step, never half-written. If the app is running, it is restarted on the new version in the same mode (tray or window), through its login item if it started at login. It quits cleanly first, so a rate change in progress finishes. If the new copy doesn't start, the installer says so, shows its output (also kept in `~/.local/state/dac-rate/gui.log`) and exits with status 1. Without a graphical session (over ssh, say) it only stops the app; it starts again at your next login. If the login item points somewhere else, for example at an old checkout, it is pointed at the installed app.
+Your rules and settings are kept. Files are replaced in one step, never half-written. If the app is running, it is restarted on the new version in the same mode (tray or window), through its login item if it started at login. It quits cleanly first, so a rate change in progress finishes. If the new copy doesn't start, the installer says so, shows its output (also kept in `~/.local/state/dac-rate/gui.log`) and exits with status 1. Without a graphical session (over ssh, say) it only stops the app, and says so: it starts again at your next login if the login item is on, otherwise open it from the app menu. If the login item points somewhere else, for example at an old checkout, it is pointed at the installed app.
 
 ## Command line
 
@@ -234,7 +234,7 @@ That file merges in any `default.clock.allowed-rates` you set yourself, always k
 - the remembered device and the app's settings (`~/.config/dac-rate/`);
 - the app's log (`~/.local/state/dac-rate/`).
 
-It then restarts the audio services, so every output is back on PipeWire's defaults. Your own WirePlumber and PipeWire config files are never touched.
+If it removed any rate rules, it then restarts the audio services, so every output is back on PipeWire's defaults right away. Your own WirePlumber and PipeWire config files are never touched.
 
 ## License
 
