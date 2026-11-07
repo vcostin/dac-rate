@@ -23,7 +23,8 @@ Open **DAC Sample Rate** from your app menu:
 - **Choose:** *Follow the content (Auto)*, *Lock to* a rate, or *PipeWire default*, then **Apply**. Sound pauses for about a second while the audio service restarts.
 - **Advanced:** which outputs the rule covers (whole card, one USB port, or one output) and the resampler quality.
 - **Warnings:** other config files that also set rates for your DAC are listed in a yellow box, with which one wins.
-- **Tray icon:** shows the live rate as a badge. Its menu switches between Auto, a locked rate and the default without opening the window. Closing the window keeps it in the tray; **Start in the tray when I log in** makes it permanent.
+- **Tray icon:** shows the live rate as a badge. Its menu switches between Auto, a locked rate and the default without opening the window. Closing the window keeps it in the tray; **Start in the tray when I log in** makes it permanent. At login it waits up to a minute for the desktop's tray to be ready; only if none appears does it open the window instead.
+- **Version:** shown next to the login option and in the tray menu's **About** item.
 
 The app uses the `dac-rate` command for every change, so the app, the tray and the command line always agree.
 
@@ -41,7 +42,7 @@ Most of these come with any desktop that uses PipeWire. Usually you only need to
 | `jq` | reads PipeWire's device list | `jq` | `jq` | `jq` |
 | systemd user session | restarts the audio services to apply a change (without it, log out and back in) | built in | built in | built in |
 
-Plus the standard tools every Linux desktop has: `sed`, `awk`, `grep`, `sort`, `xargs`, `timeout`.
+Plus the standard tools every Linux desktop has: `sed`, `awk`, `grep`, `sort`, `xargs`, `timeout`, and for the installer `mktemp` and `flock` (util-linux; without it, nothing stops two installs running at once).
 
 ### Optional
 
@@ -95,7 +96,7 @@ Tested on Arch Linux, KDE Plasma 6 (Wayland), PipeWire 1.6, WirePlumber 0.5.18, 
 
 ```bash
 git clone https://github.com/vcostin/dac-rate.git && cd dac-rate
-git checkout v1.3.0   # the latest release tag (git tag --sort=-v:refname | head -1)
+git checkout "$(git tag --sort=-v:refname | head -n1)"   # the latest release
 ./install.sh
 ```
 
@@ -106,7 +107,8 @@ No root is needed, and nothing outside your home directory is touched. `./instal
 ### Upgrade
 
 ```bash
-cd dac-rate && git fetch --tags && git checkout v1.3.0   # the new release tag
+cd dac-rate && git fetch --tags
+git checkout "$(git tag --sort=-v:refname | head -n1)"   # the latest release
 ./install.sh --dry-run   # optional: shows what it would do
 ./install.sh
 ```
@@ -114,6 +116,8 @@ cd dac-rate && git fetch --tags && git checkout v1.3.0   # the new release tag
 It says what it's doing: `Installing 1.3.0`, `Upgrading 1.2.1 → 1.3.0` or `Reinstalling 1.3.0`, and shows the source (`git describe`). If the checkout isn't exactly at a release tag, or has uncommitted changes, it warns and marks the build, for example `1.3.0 (1.3.0-2-gabc1234-dirty)`. The app's About box, `dac-rate version` and `dac-rate-gui --version` show the same. A downgrade asks first, or needs `--force`. So does a checkout whose tag doesn't match its `VERSION`.
 
 Your rules and settings are kept. Files are replaced in one step, never half-written. If the app is running, it is restarted on the new version in the same mode (tray or window), through its login item if it started at login. It quits cleanly first, so a rate change in progress finishes. If the new copy doesn't start, the installer says so, shows its output (also kept in `~/.local/state/dac-rate/gui.log`) and exits with status 1. Without a graphical session (over ssh, say) it only stops the app, and says so: it starts again at your next login if the login item is on, otherwise open it from the app menu. If the login item points somewhere else, for example at an old checkout, it is pointed at the installed app.
+
+Upgrading from 1.2.x: those versions can't quit cleanly, so the installer has to stop them at once. Don't upgrade while a rate change is being applied (the second or so after **Apply**).
 
 ## Command line
 
@@ -127,7 +131,9 @@ dac-rate reset                # remove the rule, back to PipeWire defaults
 dac-rate status               # rule, hardware rate, and any other config that affects the device
 ```
 
-Run `dac-rate` with no arguments for a simple picker in the terminal. `--json` prints devices, rates and status as JSON, which is what the app reads.
+Run `dac-rate` with no arguments for a simple picker in the terminal. `--json` prints devices, rates and status as JSON, which is what the app reads. `dac-rate version` prints the installed version.
+
+The app: `dac-rate-gui` opens the window, `dac-rate-gui --tray` starts in the tray (that's what the login item runs), and `dac-rate-gui --version` prints its version. Starting it again while it runs just shows the running one.
 
 Changing the rate restarts WirePlumber, so sound pauses for about a second. Turning Auto on or off restarts PipeWire as well, and a few apps may need restarting to get sound back.
 
@@ -217,6 +223,11 @@ That file merges in any `default.clock.allowed-rates` you set yourself, always k
 - **An app plays to the wrong output:** some players are set to a specific device in their own settings and ignore the system default. Check the player's audio-device option.
 - **A rate isn't offered:** check where the list came from with `dac-rate rates`. If it says "standard list", stop playback and run it again so the driver can be asked.
 - **Two identical DACs swap settings:** use `-m port` on each.
+- **No tray icon after login:** the app waits up to a minute for the desktop's tray, then opens its window instead. What it did is in the journal: `journalctl --user -u 'app-dac\x2drate\x2dgui@autostart.service' -b`.
+- **The app didn't come back after an upgrade:** the installer said why. Its output is in `~/.local/state/dac-rate/gui.log` (or, if it started at login, in the journal as above). Open **DAC Sample Rate** from the app menu.
+- **`dac-rate-gui: no graphical session`:** it was started without a desktop (over ssh, or from a TTY). Start it from your desktop session.
+- **`Another ./install.sh is running`:** wait for the other one to finish; the lock is released when it exits.
+- **Which version do I have?** `dac-rate version`, or the app's **About** box. A build that isn't a release says so, for example `1.3.0 (1.3.0-2-gabc1234-dirty)`.
 
 ## Uninstall
 
