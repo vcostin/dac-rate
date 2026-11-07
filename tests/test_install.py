@@ -332,11 +332,13 @@ class InstallTest(unittest.TestCase):
         self.addCleanup(victim.kill)
         script = self.tmp / "ids.sh"
         text = (self.src / "install.sh").read_text()
-        funcs = text[text.index("proc_id() {"):text.index("has_display() {")]
+        # Just the three functions under test, each from "name() {" to its closing "}" line.
+        funcs = "".join(re.search(rf"^{name}\(\) {{\n.*?^}}\n", text, re.M | re.S).group(0)
+                        for name in ("proc_id", "still_running", "stop_ids"))
         script.write_text("set -euo pipefail\nSTOP_WAIT=1\n" + funcs + f"""
 real=$(proc_id {victim.pid})
 [ "$real" = "{victim.pid}:${{real#*:}}" ] || {{ echo "bad id: $real"; exit 1; }}
-stale="{victim.pid}:1"   # same PID, another start time: a reused PID
+stale="{victim.pid}:$(( ${{real#*:}} + 1 ))"   # same PID, another start time: a reused PID
 [ -z "$(still_running "$stale")" ] || {{ echo "stale id counted as running"; exit 1; }}
 stop_ids "$stale"
 echo ok

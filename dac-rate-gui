@@ -873,7 +873,8 @@ def main():
         return 0
     if not any(os.environ.get(v) for v in ("WAYLAND_DISPLAY", "WAYLAND_SOCKET", "DISPLAY", "QT_QPA_PLATFORM")):
         # Without this, Qt aborts (a crash, a core dump and a crash reporter) when there is no display.
-        print("dac-rate-gui: no graphical session (WAYLAND_DISPLAY and DISPLAY are not set)", file=sys.stderr)
+        print("dac-rate-gui: no graphical session (none of WAYLAND_DISPLAY, WAYLAND_SOCKET, DISPLAY "
+              "or QT_QPA_PLATFORM is set)", file=sys.stderr)
         return 1
     app = QApplication(sys.argv)
     app.setApplicationName("dac-rate")
