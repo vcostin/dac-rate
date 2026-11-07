@@ -20,8 +20,9 @@ Usage: ./install.sh [option...]
   --check              Only check dependencies.
   --uninstall          Stop the app and remove the program, the menu launcher and
                        the login item. Your rate rules and settings stay.
-  --uninstall --purge  Also remove the rate rules, settings and logs, and give the
-                       outputs back to PipeWire's defaults.
+  --uninstall --purge  Also remove the rate rules, the Auto-mode PipeWire setting,
+                       the settings and the logs, and give the outputs back to
+                       PipeWire's defaults (restarts the audio services).
   --help, -h           Show this help.
 USAGE
 }

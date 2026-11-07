@@ -333,7 +333,7 @@ class InstallTest(unittest.TestCase):
             return f
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            self.assertTrue(gui.launch(app("exec sleep 5"), [], settle=0.5))
+            self.assertTrue(gui.launch(app("exec sleep 2"), [], settle=0.5))  # exits on its own soon after
             self.assertFalse(gui.launch(app("exit 0"), [], settle=2))
             self.assertFalse(gui.launch(app("echo 'cannot open display' >&2; exit 1"), [], settle=2))
         out = err.getvalue()

@@ -619,7 +619,7 @@ main() {
       *) args+=("$1"); shift ;;
     esac
   done
-  set -- "${args[@]+"${args[@]}"}"
+  set -- "${args[@]}"
   case $OPT_MATCH in ""|card|port|node) ;; *) die "--match must be card, port or node" ;; esac
 
   case ${1:-} in
