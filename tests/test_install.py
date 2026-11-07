@@ -284,6 +284,8 @@ class InstallTest(unittest.TestCase):
         self.assertNotEqual(pid, old.pid)
         argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
         self.assertIn(b"--tray", argv, "relaunched in the tray, as it was")
+        # The relaunched app must not keep the installer's lock (an inherited fd)
+        self.assertNotIn("Another ./install.sh is running", self.install(ok=None))
 
     def test_failed_relaunch_is_reported(self):
         self.install()
