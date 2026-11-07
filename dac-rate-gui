@@ -871,7 +871,7 @@ def main():
     if "--version" in sys.argv:
         print(f"dac-rate-gui {version_text()}")
         return 0
-    if not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY") or os.environ.get("QT_QPA_PLATFORM")):
+    if not any(os.environ.get(v) for v in ("WAYLAND_DISPLAY", "WAYLAND_SOCKET", "DISPLAY", "QT_QPA_PLATFORM")):
         # Without this, Qt aborts (a crash, a core dump and a crash reporter) when there is no display.
         print("dac-rate-gui: no graphical session (WAYLAND_DISPLAY and DISPLAY are not set)", file=sys.stderr)
         return 1

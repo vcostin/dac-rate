@@ -6,7 +6,6 @@ Set DAC_RATE_SHOTS=<dir> to also save screenshots of each state.
 """
 import resource
 import subprocess
-import sys
 import importlib.machinery
 import importlib.util
 import json
@@ -252,11 +251,14 @@ class GuiTest(GuiBase):
         self.assertEqual(gui.version_text(), gui.VERSION)
 
     def test_no_display_exits_without_crashing(self):
-        env = {k: val for k, val in os.environ.items() if k not in ("WAYLAND_DISPLAY", "DISPLAY", "QT_QPA_PLATFORM")}
-        r = subprocess.run([sys.executable, str(HERE.parent / "dac-rate-gui"), "--tray"], env=env,
+        # A minimal environment with no display of any kind. The script runs through its own
+        # shebang (python3 on PATH), not sys.executable, which can be a wrapper (an AppImage).
+        env = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", TMP), "LANG": "C.UTF-8",
+               "XDG_CONFIG_HOME": os.environ["XDG_CONFIG_HOME"], "DAC_RATE_CLI": os.environ["DAC_RATE_CLI"]}
+        r = subprocess.run([str(HERE.parent / "dac-rate-gui"), "--tray"], env=env,
                            capture_output=True, text=True, timeout=30)
+        self.assertIn("no graphical session", r.stderr, "the guard ran, before Qt was started")
         self.assertEqual(r.returncode, 1, "a clean exit, not an abort (-6)")
-        self.assertIn("no graphical session", r.stderr)
 
     def test_autostart_toggle(self):
         self.w.cb_autostart.setChecked(True)
