@@ -110,7 +110,7 @@ git pull --tags && git checkout v1.3.0   # or the latest release tag
 
 It says what it's doing: `Installing 1.3.0`, `Upgrading 1.2.1 → 1.3.0` or `Reinstalling 1.3.0`. It also shows the source (`git describe`). If the checkout isn't exactly at a release tag, or has uncommitted changes, it warns and marks the build, for example `1.3.0 (1.3.0-2-gabc1234-dirty)`. The app shows the same text, and so do `dac-rate version` and `dac-rate-gui --version`. A downgrade asks first, or needs `--force`. So does a checkout whose tag doesn't match its `VERSION`.
 
-Files are replaced in one step, never half-written. If the app is running, it is restarted on the new version in the same mode (tray or window), through its systemd login unit if it started at login. It quits cleanly first, so a rate change in progress finishes. If the login item points somewhere else, for example at an old checkout, it is pointed at the installed app.
+Files are replaced in one step, never half-written. If the app is running, it is restarted on the new version in the same mode (tray or window), through its systemd login unit if it started at login. It quits cleanly first, so a rate change in progress finishes. If the new copy doesn't start, the installer says so and shows its output. If the login item points somewhere else, for example at an old checkout, it is pointed at the installed app.
 
 ## Command line
 
