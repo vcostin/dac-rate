@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.1
+
+- App: when started in the tray at login before the desktop's tray is ready, it now waits up to 60 seconds for the tray instead of opening the window (which quit the app when closed). Only if no tray appears does it show the window, as before. A second launch still shows the window while it waits, and closing that window keeps it running.
+
 ## 1.2.0
 
 - New app, `dac-rate-gui` (Qt / PySide6): pick the device, choose Auto / Lock / default, set the advanced options, see the live hardware rate and any conflicting config. Changes apply in the background and errors show in a dialog.

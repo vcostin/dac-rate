@@ -58,7 +58,9 @@ def changes():
     return [c for c in calls() if "set" in c or "reset" in c]
 
 
-class GuiTest(unittest.TestCase):
+class GuiBase(unittest.TestCase):
+    """A loaded window against the fake dac-rate."""
+
     def setUp(self):
         for f in ("FAKE_STATE", "FAKE_LOG"):
             Path(os.environ[f]).unlink(missing_ok=True)
@@ -93,6 +95,8 @@ class GuiTest(unittest.TestCase):
         self.assertTrue(wait_until(lambda: not self.w.applying), "apply never finished")
         wait_until(lambda: False, 0.4)  # let the follow-up status refresh land
 
+
+class GuiTest(GuiBase):
     def test_initial_state(self):
         self.shot("1-initial")
         self.assertEqual(self.w.node, USB, "USB device is preferred when nothing is remembered")
@@ -223,6 +227,91 @@ class GuiTest(unittest.TestCase):
         self.assertTrue(text.startswith("[Desktop Entry]"))
         self.w.cb_autostart.setChecked(False)
         self.assertFalse(gui.AUTOSTART.exists())
+
+
+class TraySetupTest(GuiBase):
+    """--tray at login: the tray may appear a while after the app starts."""
+
+    def setUp(self):
+        super().setUp()
+        self.w.hide()
+        self.w.settings.setValue("tray", True)
+        self.quits = []
+        self._quit = gui.QApplication.quit
+        gui.QApplication.quit = lambda: self.quits.append(1)
+        self.ready = False
+
+    def tearDown(self):
+        gui.QApplication.quit = self._quit
+        if self.w.tray:
+            self.w.tray.setVisible(False)
+        self.w.settings.setValue("tray", True)
+        super().tearDown()
+
+    def setup(self, start_in_tray=True, wait_ms=300):
+        ts = gui.TraySetup(self.w, self.w.settings, start_in_tray, available=lambda: self.ready,
+                           wait_ms=wait_ms, poll_ms=50)
+        ts.start()
+        return ts
+
+    def test_tray_appears_late(self):
+        ts = self.setup(wait_ms=5000)
+        self.assertTrue(ts.waiting)
+        self.assertIsNone(self.w.tray)
+        self.assertFalse(self.w.isVisible(), "no window while waiting for the tray")
+        wait_until(lambda: False, 0.2)
+        self.ready = True
+        self.assertTrue(wait_until(lambda: self.w.tray is not None, 2))
+        self.assertFalse(ts.waiting)
+        self.assertFalse(self.w.tray_pending)
+        self.assertTrue(self.w.tray.isVisible())
+        self.assertFalse(self.w.isVisible(), "stays in the tray")
+        self.assertTrue(self.w.cb_tray.isEnabled() and self.w.cb_autostart.isEnabled())
+
+    def test_tray_never_appears(self):
+        ts = self.setup(wait_ms=300)
+        self.assertTrue(ts.waiting)
+        self.assertTrue(wait_until(lambda: not ts.waiting, 3))
+        self.assertIsNone(self.w.tray)
+        self.assertTrue(self.w.isVisible(), "falls back to the window")
+        self.assertFalse(self.w.cb_tray.isEnabled())
+        self.assertFalse(self.w.cb_autostart.isEnabled())
+        self.assertEqual(self.w.cb_tray.toolTip(), "No system tray found on this desktop.")
+        self.w.close()
+        self.assertEqual(self.quits, [1], "without a tray, closing the window quits as before")
+
+    def test_close_while_waiting_keeps_running(self):
+        ts = self.setup(wait_ms=5000)
+        self.w.show_and_raise()  # a second launch while waiting
+        self.w.close()
+        self.assertFalse(self.w.isVisible())
+        self.assertEqual(self.quits, [], "must not quit while the tray may still appear")
+        self.ready = True
+        self.assertTrue(wait_until(lambda: self.w.tray is not None, 2))
+        self.assertFalse(ts.waiting)
+        self.assertFalse(self.w.isVisible())
+
+    def test_late_tray_respects_setting(self):
+        self.w.settings.setValue("tray", False)
+        self.setup(wait_ms=5000)
+        self.ready = True
+        self.assertTrue(wait_until(lambda: self.w.tray is not None, 2))
+        self.assertFalse(self.w.tray.isVisible(), "tray hidden when the option is off")
+        self.assertTrue(self.w.isVisible(), "so the window is shown, as when the tray is there at start")
+
+    def test_tray_ready_at_start(self):
+        self.ready = True
+        ts = self.setup()
+        self.assertFalse(ts.waiting)
+        self.assertIsNotNone(self.w.tray)
+        self.assertFalse(self.w.isVisible())
+
+    def test_no_wait_without_tray_flag(self):
+        ts = self.setup(start_in_tray=False)
+        self.assertFalse(ts.waiting, "only --tray waits")
+        self.assertIsNone(self.w.tray)
+        self.assertTrue(self.w.isVisible())
+        self.assertFalse(self.w.cb_tray.isEnabled())
 
 
 if __name__ == "__main__":

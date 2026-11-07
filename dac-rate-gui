@@ -21,13 +21,16 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 APP_NAME = "DAC Sample Rate"
 MATCH_MODES = [
     ("card", "Whole card, any profile (recommended)"),
     ("port", "This card on this USB port only"),
     ("node", "This output only"),
 ]
+# At login the tray (Plasma's StatusNotifierWatcher) can come up after us: wait for it.
+TRAY_WAIT_MS = 60_000
+TRAY_POLL_MS = 1_000
 AUTOSTART = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "autostart" / "dac-rate-gui.desktop"
 
 
@@ -154,6 +157,7 @@ class MainWindow(QMainWindow):
         self.cli = cli
         self.settings = settings
         self.tray = None
+        self.tray_pending = False  # started with --tray, still waiting for the tray to appear
         self.devices = []
         self.node = None          # selected output
         self.status = None        # last status JSON for it
@@ -602,6 +606,10 @@ class MainWindow(QMainWindow):
         self.refresh_status()
 
     def closeEvent(self, event):
+        if not self.quitting and self.tray_pending:
+            event.ignore()  # the tray may still appear; keep running
+            self.hide()
+            return
         if self.quitting or not (self.tray and self.tray.isVisible()):
             event.accept()
             QApplication.quit()
@@ -682,6 +690,70 @@ class Tray(QSystemTrayIcon):
         m.addSeparator()
         m.addAction(QIcon.fromTheme("configure"), "Open window…", w.show_and_raise)
         m.addAction(QIcon.fromTheme("application-exit"), "Quit", _quit)
+
+
+class TraySetup(QObject):
+    """Creates the tray icon. With --tray, waits up to wait_ms for the tray to appear.
+
+    At login the app can start before the desktop's tray is ready. Instead of
+    showing the window straight away, check again every poll_ms; only when the
+    tray never shows up, show the window with the tray options turned off.
+    """
+
+    def __init__(self, window, settings, start_in_tray, available=None,
+                 wait_ms=TRAY_WAIT_MS, poll_ms=TRAY_POLL_MS):
+        super().__init__(window)
+        self.window = window
+        self.settings = settings
+        self.start_in_tray = start_in_tray
+        self.available = available or QSystemTrayIcon.isSystemTrayAvailable
+        self.wait_ms = wait_ms
+        self.tries_left = max(1, -(-wait_ms // poll_ms))
+        self.tray = None
+        self.timer = QTimer(self, interval=poll_ms)
+        self.timer.timeout.connect(self._poll)
+
+    @property
+    def waiting(self):
+        return self.timer.isActive()
+
+    def start(self):
+        if self.available():
+            self._attach()
+        elif self.start_in_tray:
+            print(f"dac-rate-gui: no system tray yet, waiting up to {self.wait_ms / 1000:g} s", file=sys.stderr)
+            self.window.tray_pending = True
+            self.timer.start()
+        else:
+            self._give_up()
+
+    def _poll(self):
+        if self.available():
+            self.timer.stop()
+            print("dac-rate-gui: system tray found", file=sys.stderr)
+            self._attach()
+            return
+        self.tries_left -= 1
+        if self.tries_left <= 0:
+            self.timer.stop()
+            print("dac-rate-gui: no system tray found, showing the window", file=sys.stderr)
+            self._give_up()
+
+    def _attach(self):
+        self.window.tray_pending = False
+        self.tray = Tray(self.window)
+        self.window.set_tray(self.tray)
+        self.tray.setVisible(self.settings.value("tray", True, type=bool))
+        if not (self.start_in_tray and self.tray.isVisible()):
+            self.window.show()
+
+    def _give_up(self):
+        self.window.tray_pending = False
+        w = self.window
+        w.cb_tray.setEnabled(False)
+        w.cb_tray.setToolTip("No system tray found on this desktop.")
+        w.cb_autostart.setEnabled(False)
+        w.show()
 
 
 def _tray_icon(hw):
@@ -779,16 +851,6 @@ def main():
     settings = QSettings("dac-rate", "dac-rate-gui")
     window = MainWindow(Cli(cli_path), settings)
 
-    tray = None
-    if QSystemTrayIcon.isSystemTrayAvailable():
-        tray = Tray(window)
-        window.set_tray(tray)
-        tray.setVisible(settings.value("tray", True, type=bool))
-    else:
-        window.cb_tray.setEnabled(False)
-        window.cb_tray.setToolTip("No system tray found on this desktop.")
-        window.cb_autostart.setEnabled(False)
-
     def on_connection():
         conn = server.nextPendingConnection()
         if conn is None:
@@ -800,8 +862,8 @@ def main():
 
     server.newConnection.connect(on_connection)
 
-    if not (start_in_tray and tray and tray.isVisible()):
-        window.show()
+    tray_setup = TraySetup(window, settings, start_in_tray)
+    tray_setup.start()
     return app.exec()
 
 
