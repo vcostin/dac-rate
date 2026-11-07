@@ -35,7 +35,7 @@ Most of these come with any desktop that uses PipeWire. Usually you only need to
 
 | What | Used for | Arch | Debian / Ubuntu | Fedora |
 |---|---|---|---|---|
-| bash 4+ | the script itself | `bash` | `bash` | `bash` |
+| bash 4.4+ | the command and the installer (every distro with WirePlumber 0.5 has bash 5) | `bash` | `bash` | `bash` |
 | `pw-dump`, `pw-cat`, `pw-metadata` | find devices, show the hardware rate, warn about a forced rate | `pipewire` | `pipewire-bin` | `pipewire-utils` |
 | **WirePlumber 0.5+** | reads the rules dac-rate writes | `wireplumber` | `wireplumber` | `wireplumber` |
 | `jq` | reads PipeWire's device list | `jq` | `jq` | `jq` |
@@ -95,22 +95,25 @@ Tested on Arch Linux, KDE Plasma 6 (Wayland), PipeWire 1.6, WirePlumber 0.5.18, 
 
 ```bash
 git clone https://github.com/vcostin/dac-rate.git && cd dac-rate
+git checkout v1.3.0   # the latest release tag (git tag --sort=-v:refname | head -1)
 ./install.sh
 ```
 
-It checks the dependencies first. If something required is missing, it stops and prints the install command. Otherwise it copies `dac-rate` and `dac-rate-gui` to `~/.local/bin` and adds a **DAC Sample Rate** launcher to your app menu. The launcher opens the app when PySide6 is installed, or a simple picker otherwise. If you install PySide6 later, run `./install.sh` again.
+It checks the dependencies first. If something required is missing, it stops and prints the install command for your distro. Otherwise it copies `dac-rate` and `dac-rate-gui` to `~/.local/bin` and adds a **DAC Sample Rate** launcher to your app menu. The launcher opens the app when PySide6 is installed, or a simple picker otherwise. If you install PySide6 later, run `./install.sh` again.
+
+No root is needed, and nothing outside your home directory is touched. `./install.sh --help` lists the options.
 
 ### Upgrade
 
 ```bash
-git pull --tags && git checkout v1.3.0   # or the latest release tag
+cd dac-rate && git fetch --tags && git checkout v1.3.0   # the new release tag
 ./install.sh --dry-run   # optional: shows what it would do
 ./install.sh
 ```
 
-It says what it's doing: `Installing 1.3.0`, `Upgrading 1.2.1 → 1.3.0` or `Reinstalling 1.3.0`. It also shows the source (`git describe`). If the checkout isn't exactly at a release tag, or has uncommitted changes, it warns and marks the build, for example `1.3.0 (1.3.0-2-gabc1234-dirty)`. The app shows the same text, and so do `dac-rate version` and `dac-rate-gui --version`. A downgrade asks first, or needs `--force`. So does a checkout whose tag doesn't match its `VERSION`.
+It says what it's doing: `Installing 1.3.0`, `Upgrading 1.2.1 → 1.3.0` or `Reinstalling 1.3.0`, and shows the source (`git describe`). If the checkout isn't exactly at a release tag, or has uncommitted changes, it warns and marks the build, for example `1.3.0 (1.3.0-2-gabc1234-dirty)`. The app's About box, `dac-rate version` and `dac-rate-gui --version` show the same. A downgrade asks first, or needs `--force`. So does a checkout whose tag doesn't match its `VERSION`.
 
-Files are replaced in one step, never half-written. If the app is running, it is restarted on the new version in the same mode (tray or window), through its systemd login unit if it started at login. It quits cleanly first, so a rate change in progress finishes. If the new copy doesn't start, the installer says so and shows its output. If the login item points somewhere else, for example at an old checkout, it is pointed at the installed app.
+Your rules and settings are kept. Files are replaced in one step, never half-written. If the app is running, it is restarted on the new version in the same mode (tray or window), through its login item if it started at login. It quits cleanly first, so a rate change in progress finishes. If the new copy doesn't start, the installer says so, shows its output (also kept in `~/.local/state/dac-rate/gui.log`) and exits with status 1. Without a graphical session (over ssh, say) it only stops the app; it starts again at your next login. If the login item points somewhere else, for example at an old checkout, it is pointed at the installed app.
 
 ## Command line
 
@@ -218,9 +221,20 @@ That file merges in any `default.clock.allowed-rates` you set yourself, always k
 ## Uninstall
 
 ```bash
-dac-rate reset        # for each device you set up
-./install.sh --uninstall   # also removes the app's login item
+./install.sh --uninstall           # keep your rate rules and settings
+./install.sh --uninstall --purge   # remove everything dac-rate added
 ```
+
+`--uninstall` stops the app (cleanly) and removes `dac-rate`, `dac-rate-gui`, the menu launcher and the login item. Your rate rules stay in effect, and it tells you how many it kept, so a later install picks up where you left off.
+
+`--uninstall --purge` also removes:
+
+- the rate rules (`~/.config/wireplumber/wireplumber.conf.d/60-dac-rate-*.conf`);
+- the Auto-mode PipeWire setting (`~/.config/pipewire/pipewire.conf.d/60-dac-rate.conf`);
+- the remembered device and the app's settings (`~/.config/dac-rate/`);
+- the app's log (`~/.local/state/dac-rate/`).
+
+It then restarts the audio services, so every output is back on PipeWire's defaults. Your own WirePlumber and PipeWire config files are never touched.
 
 ## License
 

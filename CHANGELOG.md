@@ -10,6 +10,10 @@
 - `./install.sh --dry-run` shows what would happen without changing anything.
 - The app quits cleanly on SIGTERM (systemd stop or restart, logout, the installer), so a rate change in progress finishes. `--uninstall` uses this too, instead of killing the app.
 - The app shows its version: next to the login option (it opens an About box) and as an About item in the tray menu. Qt gets it too (`setApplicationVersion`).
+- `./install.sh --uninstall --purge` removes everything dac-rate added (rate rules, the Auto-mode PipeWire setting, settings, logs) and restarts the audio services, so the outputs are back on PipeWire's defaults. Plain `--uninstall` keeps them and says how many rules it kept. Either way, systemd forgets the login item at once.
+- `./install.sh --help`.
+- Finding, stopping and restarting the running app is done by `dac-rate-gui` itself (`--restart-running`, `--stop-running`; plain Python, no Qt or PySide6 needed), not by shell code. `dac-rate-gui --version` also works without PySide6.
+- `dac-rate` and `install.sh` need bash 4.4 or newer and say so clearly on an older one (every distro with WirePlumber 0.5 has bash 5).
 - CI also runs the installer tests.
 
 ## 1.2.1

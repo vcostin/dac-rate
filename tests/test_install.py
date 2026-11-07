@@ -28,6 +28,16 @@ FILES = ["install.sh", "dac-rate", "dac-rate-gui", "dac-rate.desktop"]
 VERSION = re.search(r"^VERSION=(\S+)", (REPO / "dac-rate").read_text(), re.M).group(1)
 UNIT = r"app-dac\x2drate\x2dgui@autostart.service"
 
+
+def load_gui():
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader("dac_rate_gui", str(REPO / "dac-rate-gui"))
+    spec = importlib.util.spec_from_loader("dac_rate_gui", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
 STUBS = {
     "wireplumber": 'echo "Compiled with libwireplumber 0.5.10"; echo "Linked with libwireplumber 0.5.10"',
     "pw-dump": "exit 0", "pw-cat": "exit 0", "pw-metadata": "exit 0", "update-desktop-database": "exit 0",
@@ -304,11 +314,32 @@ class InstallTest(unittest.TestCase):
         fake.write_text(f'#!/bin/sh\nif [ -n "$FAKE_GUI_START_FAIL" ] && [ "$2" = "--tray" ]; then\n'
                         f'  echo "fake: the app cannot start" >&2; exit 1\nfi\nexec {sys.executable} "$@"\n')
         fake.chmod(0o755)
-        out = self.install(FAKE_GUI_START_FAIL="1")
+        out = self.install(FAKE_GUI_START_FAIL="1", ok=False)  # exit status 1: the files are installed, the app is not
         self.assertEqual(old.wait(5), 0)
         self.assertIn("The app did not start again", out)
         self.assertIn("fake: the app cannot start", out, "shows the app's own error")
         self.assertNotIn("Restarted", out)
+
+    def test_launch_reports_what_happened(self):
+        """launch(): up after the settle time = started; exit 0 = handed over to another copy; else its output."""
+        import contextlib
+        import io
+        gui = load_gui()
+        gui.GUI_LOG = self.tmp / "state" / "gui.log"
+        def app(body):
+            f = self.tmp / f"app-{len(list(self.tmp.glob('app-*')))}"
+            f.write_text(f"#!/bin/sh\n{body}\n")
+            f.chmod(0o755)
+            return f
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertTrue(gui.launch(app("exec sleep 5"), [], settle=0.5))
+            self.assertFalse(gui.launch(app("exit 0"), [], settle=2))
+            self.assertFalse(gui.launch(app("echo 'cannot open display' >&2; exit 1"), [], settle=2))
+        out = err.getvalue()
+        self.assertIn("handed over to another copy", out)
+        self.assertIn("exit status 1", out)
+        self.assertIn("cannot open display", out, "shows the app's output")
 
     def test_no_relaunch_without_graphical_session(self):
         self.install()
@@ -327,30 +358,96 @@ class InstallTest(unittest.TestCase):
         self.install()
 
     def test_reused_pid_is_never_signalled(self):
-        """stop_ids only signals the process it found: same PID, same start time."""
+        """The app's copies are signalled by (PID, start time): a reused PID is left alone."""
+        gui = load_gui()
         victim = subprocess.Popen(["sleep", "30"])
         self.addCleanup(victim.kill)
-        script = self.tmp / "ids.sh"
-        text = (self.src / "install.sh").read_text()
-        # Just the three functions under test, each from "name() {" to its closing "}" line.
-        funcs = "".join(re.search(rf"^{name}\(\) {{\n.*?^}}\n", text, re.M | re.S).group(0)
-                        for name in ("proc_id", "still_running", "stop_ids"))
-        script.write_text("set -euo pipefail\nSTOP_WAIT=1\n" + funcs + f"""
-real=$(proc_id {victim.pid})
-[ "$real" = "{victim.pid}:${{real#*:}}" ] || {{ echo "bad id: $real"; exit 1; }}
-stale="{victim.pid}:$(( ${{real#*:}} + 1 ))"   # same PID, another start time: a reused PID
-[ -z "$(still_running "$stale")" ] || {{ echo "stale id counted as running"; exit 1; }}
-stop_ids "$stale"
-echo ok
-""")
-        r = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=30)
-        self.assertEqual(r.stdout.strip(), "ok", r.stdout + r.stderr)
+        real = gui.proc_id(victim.pid)
+        self.assertEqual(real[0], victim.pid)
+        stale = (victim.pid, real[1] + 1)  # same PID, another start time
+        self.assertEqual(gui.still_running([stale]), [])
+        self.assertTrue(gui.stop_copies([stale], wait=1))
         self.assertIsNone(victim.poll(), "the unrelated process was not signalled")
+        self.assertEqual(gui.still_running([real]), [real])
+        self.assertTrue(gui.stop_copies([real], wait=5), "the real one is stopped by SIGTERM")
+        self.assertEqual(victim.wait(5), -signal.SIGTERM)
+
+    def test_find_running_matches_only_the_installed_path(self):
+        gui = load_gui()
+        self.install()
+        app = self.start_app("--tray")
+        found = gui.find_running(self.gui)
+        self.assertEqual([i[0] for i, _ in found], [app.pid])
+        self.assertEqual(found[0][1], ["--tray"])
+        self.assertEqual(gui.find_running(self.tmp / "elsewhere" / "dac-rate-gui"), [])
 
     def test_no_restart_when_not_running(self):
         out = self.install()
         self.assertNotIn("Restarted", out)
         self.assertNotIn("restart", Path(self.env["SYSTEMCTL_LOG"]).read_text() if Path(self.env["SYSTEMCTL_LOG"]).exists() else "")
+
+    def test_dry_run_with_app_running(self):
+        self.install()
+        app = self.start_app("--tray")
+        out = self.install("--dry-run")
+        self.assertIn(f"Would restart the running app (PID {app.pid}, tray mode)", out)
+        self.assertIsNone(app.poll(), "a dry run does not stop it")
+
+    def test_help(self):
+        out = self.install("--help")
+        for opt in ("--dry-run", "--force", "--check", "--uninstall", "--purge"):
+            self.assertIn(opt, out)
+        self.assertIn("Usage", self.install("--bogus", ok=False))
+
+    def test_purge_needs_uninstall(self):
+        self.assertIn("--purge goes with --uninstall", self.install("--purge", ok=False))
+
+    def make_user_data(self):
+        conf = self.home / ".config"
+        rule = conf / "wireplumber/wireplumber.conf.d/60-dac-rate-usb-test.conf"
+        other = conf / "wireplumber/wireplumber.conf.d/50-mine.conf"
+        pw = conf / "pipewire/pipewire.conf.d/60-dac-rate.conf"
+        state = conf / "dac-rate/device"
+        log = self.home / ".local/state/dac-rate/gui.log"
+        for f in (rule, other, pw, state, log):
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("x\n")
+        return rule, other, pw, state, log
+
+    def test_uninstall_keeps_rules_and_says_how_to_purge(self):
+        self.install()
+        rule, other, pw, state, log = self.make_user_data()
+        out = self.install("--uninstall")
+        self.assertIn("Kept 1 rate rule(s)", out)
+        self.assertIn("./install.sh --uninstall --purge", out)
+        self.assertTrue(rule.exists() and pw.exists() and state.exists())
+        self.assertIn("--user daemon-reload", self.systemctl_calls(), "the login unit goes away")
+
+    def test_uninstall_purge_removes_everything_of_ours(self):
+        self.install()
+        self.login_item.parent.mkdir(parents=True, exist_ok=True)
+        self.login_item.write_text(f"[Desktop Entry]\nType=Application\nName=x\nExec={self.gui} --tray\n")
+        rule, other, pw, state, log = self.make_user_data()
+        out = self.install("--uninstall", "--purge")
+        self.assertIn("Removed 1 rate rule(s)", out)
+        self.assertIn("PipeWire's defaults again", out)
+        for f in (self.bin, self.gui, self.login_item, rule, pw, state, log):
+            self.assertFalse(f.exists(), f)
+        self.assertTrue(other.exists(), "the user's own WirePlumber config is left alone")
+        self.assertIn("--user restart pipewire.service pipewire-pulse.service wireplumber.service",
+                      self.systemctl_calls())
+
+    def test_maintenance_needs_no_pyside6(self):
+        """--version and --stop-running run before PySide6 is imported (uninstall works without it)."""
+        no_qt = self.tmp / "no-qt" / "PySide6"
+        no_qt.mkdir(parents=True)
+        (no_qt / "__init__.py").write_text("raise ImportError('PySide6 is not installed (test)')\n")
+        env = {**self.env, "PYTHONPATH": str(no_qt.parent)}
+        for args in (["--version"], ["--stop-running", str(self.gui)]):
+            r = subprocess.run([sys.executable, str(REPO / "dac-rate-gui"), *args], env=env,
+                               capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertNotIn("Traceback", r.stderr)
 
     def test_uninstall_quits_app_cleanly(self):
         self.install()
