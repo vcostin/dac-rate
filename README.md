@@ -24,7 +24,7 @@ Open **DAC Sample Rate** from your app menu:
 - **Advanced:** which outputs the rule covers (whole card, one USB port, or one output) and the resampler quality.
 - **Warnings:** other config files that also set rates for your DAC are listed in a yellow box, with which one wins.
 - **Tray icon:** shows the live rate as a badge. Its menu switches between Auto, a locked rate and the default without opening the window. Closing the window keeps it in the tray; **Start in the tray when I log in** makes it permanent. At login it waits up to a minute for the desktop's tray to be ready; only if none appears does it open the window instead.
-- **Version:** shown next to the login option and in the tray menu's **About** item.
+- **Version:** shown next to the login option (click it for the About box) and in the tray menu's **About** item.
 
 The app uses the `dac-rate` command for every change, so the app, the tray and the command line always agree.
 
@@ -113,9 +113,14 @@ git checkout "$(git tag --sort=-v:refname | head -n1)"   # the latest release
 ./install.sh
 ```
 
-It says what it's doing: `Installing 1.3.0`, `Upgrading 1.2.1 → 1.3.0` or `Reinstalling 1.3.0`, and shows the source (`git describe`). If the checkout isn't exactly at a release tag, or has uncommitted changes, it warns and marks the build, for example `1.3.0 (1.3.0-2-gabc1234-dirty)`. The app's About box, `dac-rate version` and `dac-rate-gui --version` show the same. A downgrade asks first, or needs `--force`. So does a checkout whose tag doesn't match its `VERSION`.
+It says what it's doing: `Installing 1.3.0`, `Upgrading 1.2.1 → 1.3.0` or `Reinstalling 1.3.0`, and shows the source (`git describe`). If the checkout isn't exactly at a release tag, or has uncommitted changes, it warns and marks the build, for example `1.3.0 (1.3.0-2-gabc1234-dirty)`. The app's About box, `dac-rate version` and `dac-rate-gui --version` show the same. A downgrade asks first (or needs `--force` when there's no terminal to ask in). A checkout whose tag doesn't match its `VERSION` stops the install, unless you add `--force`.
 
-Your rules and settings are kept. Files are replaced in one step, never half-written. If the app is running, it is restarted on the new version in the same mode (tray or window), through its login item if it started at login. It quits cleanly first, so a rate change in progress finishes. If the new copy doesn't start, the installer says so, shows its output (also kept in `~/.local/state/dac-rate/gui.log`) and exits with status 1. Without a graphical session (over ssh, say) it only stops the app, and says so: it starts again at your next login if the login item is on, otherwise open it from the app menu. If the login item points somewhere else, for example at an old checkout, it is pointed at the installed app.
+Your rules and settings are kept. Files are replaced in one step, never half-written. If the app is running, it quits cleanly first (so a rate change in progress finishes) and is restarted on the new version in the same mode:
+
+- **Started at login:** its login item is started again. If that fails, the installer says so and points you to the journal (`journalctl --user -u 'app-dac\x2drate\x2dgui@autostart.service'`).
+- **Started any other way:** it is started again directly. If it doesn't come up, the installer shows its output, which is also kept in `~/.local/state/dac-rate/gui.log`. Without a graphical session (over ssh, say) it is only stopped, and the installer says so: it starts again at your next login if the login item is on, otherwise open it from the app menu.
+
+If the restart fails, the installer exits with status 1 (the new files are installed either way). If the login item points somewhere else, for example at an old checkout, it is pointed at the installed app.
 
 Upgrading from 1.2.x: those versions can't quit cleanly, so the installer has to stop them at once. Don't upgrade while a rate change is being applied (the second or so after **Apply**).
 
@@ -133,7 +138,7 @@ dac-rate status               # rule, hardware rate, and any other config that a
 
 Run `dac-rate` with no arguments for a simple picker in the terminal. `--json` prints devices, rates and status as JSON, which is what the app reads. `dac-rate version` prints the installed version.
 
-The app: `dac-rate-gui` opens the window, `dac-rate-gui --tray` starts in the tray (that's what the login item runs), and `dac-rate-gui --version` prints its version. Starting it again while it runs just shows the running one.
+The app: `dac-rate-gui` opens the window, `dac-rate-gui --tray` starts in the tray (that's what the login item runs), and `dac-rate-gui --version` prints its version. Starting `dac-rate-gui` again while it runs just shows the running one's window (`--tray` leaves it in the tray).
 
 Changing the rate restarts WirePlumber, so sound pauses for about a second. Turning Auto on or off restarts PipeWire as well, and a few apps may need restarting to get sound back.
 
