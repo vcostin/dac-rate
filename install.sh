@@ -415,7 +415,12 @@ fi
 if (( DRY_RUN )); then
   echo "Would install $BIN, $GUI and the menu launcher${BUILD:+, marked as build $BUILD}"
   case $restart in
-    unit) echo "Would restart the running app (PID ${old_pids[*]-?}, through systemd unit $UNIT)" ;;
+    unit)
+      if (( ${#old_pids[@]} )); then
+        echo "Would restart the running app (PID ${old_pids[*]}, through systemd unit $UNIT)"
+      else
+        echo "Would restart the running app (systemd unit $UNIT)"
+      fi ;;
     tray|window) echo "Would restart the running app (PID ${old_pids[*]}, $restart mode)" ;;
   esac
   (( fix_login_item )) && echo "Would point the login item at $GUI"
