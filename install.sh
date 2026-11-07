@@ -13,6 +13,8 @@ GUI="$HOME/.local/bin/dac-rate-gui"
 APP="${XDG_DATA_HOME:-$HOME/.local/share}/applications/dac-rate.desktop"
 LOGIN_ITEM="${XDG_CONFIG_HOME:-$HOME/.config}/autostart/dac-rate-gui.desktop"
 # The unit systemd generates from the login item (systemd-xdg-autostart-generator).
+# Its stop timeout is 5 s, too short for a rate change to finish, so the installer
+# stops the app itself and then starts the unit, rather than 'systemctl restart'.
 UNIT='app-dac\x2drate\x2dgui@autostart.service'
 STOP_WAIT=35  # seconds; the app lets a rate change finish before it quits (up to 30 s)
 
@@ -199,27 +201,58 @@ unit_active() {
   command -v systemctl >/dev/null && systemctl --user is-active --quiet "$UNIT" 2>/dev/null
 }
 
-# Running and not a zombie (an exited process its parent has not collected yet).
-alive() {
-  local stat
-  stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
-  stat=${stat##*) }
-  [[ ${stat%% *} != Z ]]
+# "PID:start time" for a running process (not a zombie, i.e. an exited process its
+# parent has not collected yet); nothing if it is gone. The start time tells a
+# reused PID apart.
+proc_id() {
+  local stat fields
+  stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 0
+  read -r -a fields <<<"${stat##*) }"
+  [[ ${fields[0]} == Z ]] || echo "$1:${fields[19]}"
 }
 
 # Send SIGTERM (the app quits cleanly, letting a change finish) and wait.
 stop_pids() {
-  local pid i
-  (( $# )) || return 0
+  local pid i ids=() left
+  for pid in "$@"; do
+    ids+=("$(proc_id "$pid")")
+  done
+  (( ${#ids[@]} )) || return 0
   kill -TERM "$@" 2>/dev/null || true
   for ((i = 0; i < STOP_WAIT * 10; i++)); do
-    for pid in "$@"; do
-      alive "$pid" && { sleep 0.1; continue 2; }
+    left=()
+    for pid in "${ids[@]}"; do
+      [[ -n $pid && $(proc_id "${pid%%:*}") == "$pid" ]] && left+=("${pid%%:*}")
     done
-    return 0
+    (( ${#left[@]} )) || return 0
+    sleep 0.1
   done
   echo "The app did not quit within $STOP_WAIT s; stopping it." >&2
-  kill -KILL "$@" 2>/dev/null || true
+  kill -KILL "${left[@]}" 2>/dev/null || true
+}
+
+# Start the app detached and check that it stays up; show its errors if not.
+# Its output (Qt's too, which would otherwise go to the journal) goes to a log file.
+launch_detached() {
+  local log i pid new
+  log="${XDG_STATE_HOME:-$HOME/.local/state}/dac-rate/gui.log"
+  mkdir -p "$(dirname "$log")"
+  QT_FORCE_STDERR_LOGGING=1 setsid -f "$GUI" "$@" </dev/null >"$log" 2>&1
+  for ((i = 0; i < 30; i++)); do
+    sleep 0.1
+    new=""
+    for pid in $(gui_pids); do
+      [[ " ${pids[*]-} " == *" $pid "* ]] || new=$pid
+    done
+    [[ -n $new ]] && break
+  done
+  sleep 1  # past a crash at startup
+  if [[ -n $new && -n $(proc_id "$new") ]]; then
+    return 0
+  fi
+  echo "The app did not start again. Its output ($log):" >&2
+  sed 's/^/  /' "$log" >&2
+  return 1
 }
 
 has_display() {
@@ -266,28 +299,37 @@ desktop_quote() {
 
 # --- commands ----------------------------------------------------------------------
 
-if [[ ${1:-} == --uninstall ]]; then
+FORCE=0 DRY_RUN=0 CHECK=0 UNINSTALL=0
+for arg in "$@"; do
+  case $arg in
+    --force) FORCE=1 ;;
+    --dry-run|-n) DRY_RUN=1 ;;
+    --check) CHECK=1 ;;
+    --uninstall) UNINSTALL=1 ;;
+    *) echo "Unknown option: $arg (see the top of install.sh)" >&2; exit 2 ;;
+  esac
+done
+
+# One installer at a time.
+LOCK="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/dac-rate-install.$(id -u).lock"
+if (( ! CHECK )) && command -v flock >/dev/null; then
+  exec 9>"$LOCK"
+  flock -n 9 || { echo "Another ./install.sh is running." >&2; exit 1; }
+fi
+
+if (( UNINSTALL )); then
+  # Stop it ourselves first: the unit's 5 s stop timeout could cut off a rate change.
+  mapfile -t pids < <(gui_pids)
+  stop_pids "${pids[@]+"${pids[@]}"}"
   if unit_active; then
     systemctl --user stop "$UNIT" || true
   fi
-  mapfile -t pids < <(gui_pids)
-  stop_pids "${pids[@]+"${pids[@]}"}"
   rm -f "$BIN" "$GUI" "$APP" "$LOGIN_ITEM"
   refresh_menu
   echo "Removed $BIN, $GUI, the menu launcher and the login item"
   echo "Rules left in ~/.config/wireplumber/wireplumber.conf.d/60-dac-rate-*.conf (delete them to undo the rates)."
   exit 0
 fi
-
-FORCE=0 DRY_RUN=0 CHECK=0
-for arg in "$@"; do
-  case $arg in
-    --force) FORCE=1 ;;
-    --dry-run|-n) DRY_RUN=1 ;;
-    --check) CHECK=1 ;;
-    *) echo "Unknown option: $arg (see the top of install.sh)" >&2; exit 2 ;;
-  esac
-done
 
 check_deps || exit 1
 (( CHECK )) && exit 0
@@ -354,7 +396,7 @@ fi
 if (( DRY_RUN )); then
   echo "Would install $BIN, $GUI and the menu launcher${BUILD:+, marked as build $BUILD}"
   case $restart in
-    unit) echo "Would restart the running app (systemd unit $UNIT)" ;;
+    unit) echo "Would restart the running app (PID ${pids[*]-?}, through systemd unit $UNIT)" ;;
     tray|window) echo "Would restart the running app (PID ${pids[*]}, $restart mode)" ;;
   esac
   (( fix_login_item )) && echo "Would point the login item at $GUI"
@@ -392,17 +434,25 @@ was=$NEW
 [[ -n $OLD && $OLD != "$NEW" ]] && was="$OLD → $NEW"
 case $restart in
   unit)
-    if systemctl --user restart "$UNIT"; then
+    stop_pids "${pids[@]+"${pids[@]}"}"
+    # Still active: it runs something other than $GUI (an old path in the login item).
+    if unit_active; then systemctl --user stop "$UNIT" || true; fi
+    # The unit's ExecStart comes from the login item when systemd reads it.
+    (( fix_login_item )) && systemctl --user daemon-reload
+    if systemctl --user start "$UNIT" && sleep 1 && unit_active; then
       echo "Restarted the running app ($was)"
     else
-      echo "Could not restart $UNIT; log out and back in to run the new version." >&2
+      echo "Could not start $UNIT again (see: journalctl --user -u '$UNIT'); log out and back in to run the new version." >&2
     fi ;;
   tray|window)
     stop_pids "${pids[@]}"
     if has_display; then
       args=(); [[ $restart == tray ]] && args=(--tray)
-      setsid -f "$GUI" "${args[@]+"${args[@]}"}" </dev/null >/dev/null 2>&1
-      echo "Restarted the running app ($was)"
+      if launch_detached "${args[@]+"${args[@]}"}"; then
+        echo "Restarted the running app ($was)"
+      else
+        echo "Stopped the old app ($was), but the new one did not start; open it from the app menu." >&2
+      fi
     else
       echo "Stopped the running app ($was); no desktop session here, so start it again yourself."
     fi ;;

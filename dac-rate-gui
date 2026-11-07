@@ -873,7 +873,7 @@ def main():
         return 0
     app = QApplication(sys.argv)
     app.setApplicationName("dac-rate")
-    app.setApplicationVersion(VERSION)
+    app.setApplicationVersion(version_text())
     app.setApplicationDisplayName(APP_NAME)
     app.setDesktopFileName("dac-rate")
     app.setQuitOnLastWindowClosed(False)

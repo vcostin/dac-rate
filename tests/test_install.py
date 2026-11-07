@@ -76,9 +76,10 @@ class InstallTest(unittest.TestCase):
             (stubs / "jq").write_text("#!/bin/sh\nexit 0\n")
             (stubs / "jq").chmod(0o755)
         (self.tmp / "run").mkdir()
+        (self.tmp / "xdg").mkdir()
         self.env = {
             "HOME": str(self.home), "PATH": f"{stubs}:{os.environ['PATH']}", "LANG": "C.UTF-8",
-            "TMPDIR": str(self.tmp / "run"), "QT_QPA_PLATFORM": "offscreen",
+            "TMPDIR": str(self.tmp / "run"), "XDG_RUNTIME_DIR": str(self.tmp / "xdg"), "QT_QPA_PLATFORM": "offscreen",
             "SYSTEMCTL_LOG": str(self.tmp / "systemctl.log"), "FAKE_UNIT_ACTIVE": str(self.tmp / "unit-active"),
             "DAC_RATE_CLI": str(HERE / "fake-dac-rate"),
             "FAKE_STATE": str(self.tmp / "state.json"), "FAKE_LOG": str(self.tmp / "calls.log"),
@@ -96,8 +97,8 @@ class InstallTest(unittest.TestCase):
         return subprocess.run(["git", *args], cwd=self.src, env=self.env, check=True,
                               capture_output=True, text=True).stdout.strip()
 
-    def install(self, *args, ok=True):
-        r = subprocess.run(["bash", str(self.src / "install.sh"), *args], env=self.env,
+    def install(self, *args, ok=True, **env):
+        r = subprocess.run(["bash", str(self.src / "install.sh"), *args], env={**self.env, **env},
                            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
         out = r.stdout + r.stderr
         if ok is not None:
@@ -117,7 +118,8 @@ class InstallTest(unittest.TestCase):
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(lambda: p.poll() is None and p.kill())
         # Ready once the single-instance server is listening.
-        self.assertTrue(wait_for(lambda: any(self.tmp.joinpath("run").iterdir())), "app never started")
+        self.assertTrue(wait_for(lambda: any(f.name.startswith("dac-rate-gui-") for f in self.tmp.joinpath("run").iterdir())),
+                        "app never started")
         return p
 
     def kill_apps(self):
@@ -235,13 +237,38 @@ class InstallTest(unittest.TestCase):
         self.assertIn(f"\nExec={self.gui} --tray\n", self.login_item.read_text())
         self.assertNotIn("Pointed the login item", self.install(), "left alone once correct")
 
+    def systemctl_calls(self):
+        log = Path(self.env["SYSTEMCTL_LOG"])
+        return log.read_text().splitlines() if log.exists() else []
+
     def test_restarts_systemd_unit(self):
         self.install()
         self.set_installed_version("1.0.0")
         Path(self.env["FAKE_UNIT_ACTIVE"]).touch()
         out = self.install()
         self.assertIn(f"Restarted the running app (1.0.0 → {VERSION})", out)
-        self.assertIn(f"--user restart {UNIT}", Path(self.env["SYSTEMCTL_LOG"]).read_text())
+        calls = self.systemctl_calls()
+        self.assertIn(f"--user start {UNIT}", calls)
+        self.assertNotIn(f"--user restart {UNIT}", calls, "restart would SIGKILL after the unit's 5 s stop timeout")
+
+    def test_unit_app_is_stopped_cleanly_before_start(self):
+        self.install()
+        app = self.start_app("--tray")
+        Path(self.env["FAKE_UNIT_ACTIVE"]).touch()
+        out = self.install()
+        self.assertEqual(app.wait(5), 0, "stopped by SIGTERM through the app's own quit, not killed")
+        self.assertNotIn("did not quit", out)
+        self.assertIn(f"--user start {UNIT}", self.systemctl_calls())
+
+    def test_unit_reloaded_after_login_item_fix(self):
+        self.install()
+        self.login_item.parent.mkdir(parents=True)
+        self.login_item.write_text("[Desktop Entry]\nType=Application\nName=x\nExec=/old/dac-rate-gui --tray\n")
+        Path(self.env["FAKE_UNIT_ACTIVE"]).touch()
+        self.install()
+        calls = self.systemctl_calls()
+        self.assertIn("--user daemon-reload", calls)
+        self.assertLess(calls.index("--user daemon-reload"), calls.index(f"--user start {UNIT}"))
 
     def test_restarts_running_app_in_same_mode(self):
         self.install()
@@ -258,6 +285,22 @@ class InstallTest(unittest.TestCase):
         argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
         self.assertIn(b"--tray", argv, "relaunched in the tray, as it was")
 
+    def test_failed_relaunch_is_reported(self):
+        self.install()
+        old = self.start_app("--tray")
+        out = self.install(QT_QPA_PLATFORM="no-such-platform")
+        self.assertEqual(old.wait(5), 0)
+        self.assertIn("The app did not start again", out)
+        self.assertIn("no-such-platform", out, "shows the app's own error")
+        self.assertNotIn("Restarted", out)
+
+    def test_concurrent_install_refused(self):
+        import fcntl
+        with open(self.tmp / "xdg" / f"dac-rate-install.{os.getuid()}.lock", "w") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            self.assertIn("Another ./install.sh is running", self.install(ok=False))
+        self.install()
+
     def test_no_restart_when_not_running(self):
         out = self.install()
         self.assertNotIn("Restarted", out)
@@ -266,7 +309,7 @@ class InstallTest(unittest.TestCase):
     def test_uninstall_quits_app_cleanly(self):
         self.install()
         app = self.start_app()
-        out = self.install("--uninstall")
+        out = self.install("--force", "--uninstall")
         self.assertIn("Removed", out)
         self.assertNotIn("did not quit", out)
         self.assertEqual(app.wait(5), 0, "quit through SIGTERM, cleanly")
