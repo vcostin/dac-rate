@@ -237,7 +237,8 @@ launch_detached() {
   local log i pid new
   log="${XDG_STATE_HOME:-$HOME/.local/state}/dac-rate/gui.log"
   mkdir -p "$(dirname "$log")"
-  QT_FORCE_STDERR_LOGGING=1 setsid -f "$GUI" "$@" </dev/null >"$log" 2>&1
+  # 9>&-: the app must not inherit the installer's lock (it would hold it while it runs).
+  QT_FORCE_STDERR_LOGGING=1 setsid -f "$GUI" "$@" </dev/null >"$log" 2>&1 9>&-
   for ((i = 0; i < 30; i++)); do
     sleep 0.1
     new=""
